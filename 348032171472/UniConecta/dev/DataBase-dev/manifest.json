@@ -1,0 +1,28 @@
+{
+  "external_repositories": [],
+  "action": "apply",
+  "trigger_id": "1779651519437",
+  "backend_global_config": {
+    "provider": "aws",
+    "role_arn": "arn:aws:iam::348032171472:role/Struct8-Gitops-UnicinRepo-Uniconecta",
+    "region": "sa-east-1",
+    "bucket": "backend-unicin"
+  },
+  "pipeline_stages": [
+    {
+      "stage_name": "Manual Trigger: DataBase-dev",
+      "parallel_execution": false,
+      "states": [
+        {
+          "path": "348032171472/UniConecta/dev/DataBase-dev",
+          "provider": "aws",
+          "target_auth": {
+            "role_arn": "arn:aws:iam::348032171472:role/Struct8-Gitops-UnicinRepo-Uniconecta",
+            "region": "sa-east-1",
+            "secret_name": "AUTH_AWS_348032171472"
+          }
+        }
+      ]
+    }
+  ]
+}
