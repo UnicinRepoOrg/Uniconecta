@@ -1,0 +1,62 @@
+#.github/workflows/lambda-sync.yml
+name: "CloudMan Sync Listener"
+
+on:
+  workflow_dispatch:
+    inputs:
+      # 1. Parâmetros de Operação
+      direction:
+        description: "push (AWS->Git), pull (Git->AWS) or create"
+        required: true
+        type: string
+      region:
+        description: "AWS Region"
+        default: "us-east-1"
+        type: string
+      role_arn:
+        description: "IAM Role to Assume via OIDC"
+        required: true
+        type: string
+      resources_json:
+        description: "JSON Array of resources to sync"
+        required: true
+        type: string
+
+      # 2. Parâmetros do Repositório Alvo (Onde o código vive)
+      target_repo:
+        description: "Target Repository (Org/Repo)"
+        required: true
+        type: string
+      target_branch:
+        description: "Target Branch"
+        default: "main"
+        required: false
+        type: string
+
+      # 3. Autenticação Automatizada (Zero Config)
+      # Recebe o token gerado pela GitHub App no Backend
+      git_token:
+        description: "Temporary GitHub App Token"
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: write
+
+jobs:
+  sync-job:
+    # Chama o Engine Centralizado
+    # Certifique-se de que o repositório 'cloudman-core' é público ou que a App tem acesso a ele
+    uses: Struct8/cloudman-core/.github/workflows/lambda-sync.yml@main
+    with:
+      # Repassa todos os inputs recebidos do Backend para o Engine
+      direction: ${{ inputs.direction }}
+      region: ${{ inputs.region }}
+      role_arn: ${{ inputs.role_arn }}
+      resources_json: ${{ inputs.resources_json }}
+      target_repo: ${{ inputs.target_repo }}
+      target_branch: ${{ inputs.target_branch }}
+      
+      # AQUI ESTÁ A SOLUÇÃO: Passamos o token da App para o Engine
+      git_token: ${{ inputs.git_token }}
