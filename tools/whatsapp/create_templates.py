@@ -92,6 +92,8 @@ def graph(method, path, body=None, params=None):
             return e.code, json.loads(e.read().decode('utf-8'))
         except Exception:
             return e.code, {}
+    except Exception as e:  # timeout / rede: reporta em vez de quebrar
+        return 0, {'error': f"{type(e).__name__}: {e}"}
 
 
 def template_status(name):
