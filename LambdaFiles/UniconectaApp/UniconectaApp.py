@@ -7,6 +7,7 @@ import hmac
 import base64
 import hashlib
 import logging
+import urllib.request
 from datetime import datetime, timezone
 from boto3.dynamodb.conditions import Key
 
@@ -28,6 +29,13 @@ PATH_PREFIX = os.environ.get('API_PATH_PREFIX', '/behavior-dev')
 # GSI por status para listar sem Scan (Query só lê os itens de cada status).
 STATUS_INDEX = os.environ.get('STATUS_INDEX_NAME', 'StatusIndex')
 LISTABLE_STATUSES = ('pending', 'approved', 'rejected')
+
+# --- WhatsApp Cloud API (Meta) — boas-vindas ao aprovar (opcional: sem config, só loga) ---
+PARAM_NAME_TOKEN = os.environ.get('AWS_SSM_PARAMETER_NAME_0') or os.getenv("AWS_SSM_PARAMETER_TARGET_NAME_0")
+GRAPH_API_URL = os.environ.get('GRAPH_API_URL', 'https://graph.facebook.com/v26.0').rstrip('/')
+WA_PHONE_NUMBER_ID = os.environ.get('WA_PHONE_NUMBER_ID')
+WA_TEMPLATE_WELCOME = os.environ.get('WA_TEMPLATE_WELCOME', 'boas_vindas_aprovado')
+WA_TEMPLATE_LANG = os.environ.get('WA_TEMPLATE_LANG', 'pt_BR')
 
 # --- Admins (multi-admin) ---
 # ADMINS_JSON = lista [{"email","hash"}]; mesclado com o admin único (fallback).
@@ -143,6 +151,51 @@ def verify_password(password: str, stored: str) -> bool:
     except Exception as e:
         logger.warning(f"Password verification failed: {e}")
         return False
+
+
+# =====================================================================
+#  Helpers — WhatsApp (template de boas-vindas)
+# =====================================================================
+
+_WA_TOKEN = None
+
+
+def _wa_token():
+    """Token da Meta lido do SSM só no primeiro uso (o app sobe mesmo sem SSM)."""
+    global _WA_TOKEN
+    if _WA_TOKEN is None:
+        ssm = boto3.client("ssm", region_name=AWS_REGION)
+        _WA_TOKEN = ssm.get_parameter(Name=PARAM_NAME_TOKEN, WithDecryption=True)["Parameter"]["Value"]
+    return _WA_TOKEN
+
+
+def send_welcome_template(item):
+    """Envia o template de boas-vindas ao voluntário aprovado. Falhas só são logadas."""
+    if not (PARAM_NAME_TOKEN and WA_PHONE_NUMBER_ID):
+        logger.warning("WhatsApp não configurado (AWS_SSM_PARAMETER_NAME_0/WA_PHONE_NUMBER_ID); boas-vindas não enviada.")
+        return False
+    to = re.sub(r'\D', '', str(item.get('wa_jid') or item.get('ID') or ''))
+    name = re.sub(r'\s+', ' ', str(item.get('nome_preferido') or item.get('nome_completo') or 'voluntário(a)')).strip()
+    payload = {
+        'messaging_product': 'whatsapp', 'recipient_type': 'individual', 'to': to, 'type': 'template',
+        'template': {'name': WA_TEMPLATE_WELCOME, 'language': {'code': WA_TEMPLATE_LANG}, 'components': [
+            {'type': 'body', 'parameters': [{'type': 'text', 'text': name[:200]}]},
+            {'type': 'button', 'sub_type': 'quick_reply', 'index': '0',
+             'parameters': [{'type': 'payload', 'payload': 'open_menu'}]},
+        ]},
+    }
+    try:
+        req = urllib.request.Request(f"{GRAPH_API_URL}/{WA_PHONE_NUMBER_ID}/messages",
+                                     data=json.dumps(payload).encode('utf-8'), method='POST',
+                                     headers={'Authorization': f"Bearer {_wa_token()}", 'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            logger.info(f"Welcome template sent to {to}: {response.status}")
+            return True
+    except urllib.error.HTTPError as e:
+        logger.error(f"Welcome template to {to} failed: HTTP {e.code} - {e.read().decode('utf-8')}")
+    except Exception as e:
+        logger.error(f"Welcome template to {to} failed: {e}")
+    return False
 
 
 # =====================================================================
@@ -352,7 +405,8 @@ def handle_update_recipient(event, recipient_id):
 
 
 def handle_patch_status(event, recipient_id):
-    if not users_table.get_item(Key={'ID': recipient_id}).get('Item'):
+    current = users_table.get_item(Key={'ID': recipient_id}).get('Item')
+    if not current:
         return error(404, "Cadastro não encontrado.")
     try:
         data = parse_body(event)
@@ -361,7 +415,10 @@ def handle_patch_status(event, recipient_id):
     status = data.get('status')
     if status not in ('approved', 'rejected', 'pending'):
         return error(400, "Status inválido.")
-    return respond(200, item_to_response(_apply_update(recipient_id, {'status': status, 'updated_at': now_iso()})))
+    updated = _apply_update(recipient_id, {'status': status, 'updated_at': now_iso()})
+    if status == 'approved' and current.get('status') != 'approved':
+        send_welcome_template(updated)
+    return respond(200, item_to_response(updated))
 
 
 def handle_delete_recipient(event, recipient_id):

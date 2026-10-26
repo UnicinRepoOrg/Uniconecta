@@ -1,5 +1,6 @@
 import boto3
 import os
+import re
 import json
 import logging
 import urllib.request
@@ -14,8 +15,10 @@ logger.setLevel(logging.INFO)
 DYNAMODB_USERS_TABLE_NAME = os.environ.get('AWS_DYNAMODB_TABLE_NAME_0') or os.environ.get('AWS_DYNAMODB_TABLE_TARGET_NAME_0')
 DYNAMODB_REQUESTS_TABLE_NAME = os.environ.get('AWS_DYNAMODB_TABLE_NAME_1') or os.environ.get('AWS_DYNAMODB_TABLE_TARGET_NAME_1')
 AWS_REGION = os.environ.get('REGION', 'us-east-1')
-API_URL = os.environ.get('API_URL', 'https://gate.whapi.cloud')
 PARAM_NAME_TOKEN = os.environ.get('AWS_SSM_PARAMETER_NAME_0') or os.getenv("AWS_SSM_PARAMETER_TARGET_NAME_0")
+# WhatsApp Business Cloud API (Meta)
+GRAPH_API_URL = os.environ.get('GRAPH_API_URL', 'https://graph.facebook.com/v26.0').rstrip('/')
+WA_PHONE_NUMBER_ID = os.environ.get('WA_PHONE_NUMBER_ID')
 
 # --- Hardcoded Supervisor List ---
 SUPERVISOR_NUMBERS = ['553186155781']
@@ -34,7 +37,7 @@ FEEDBACK_PROMPT = (
 FEEDBACK_DELAY_MINUTES = 10
 
 # --- Validações e Clientes Boto3 ---
-if not all([DYNAMODB_USERS_TABLE_NAME, DYNAMODB_REQUESTS_TABLE_NAME, PARAM_NAME_TOKEN]):
+if not all([DYNAMODB_USERS_TABLE_NAME, DYNAMODB_REQUESTS_TABLE_NAME, PARAM_NAME_TOKEN, WA_PHONE_NUMBER_ID]):
     logger.error("CRITICAL ERROR: Essential environment variables not configured.")
     raise ValueError("Incomplete environment configuration.")
 
@@ -51,32 +54,42 @@ except Exception as e:
     logger.error(f"CRITICAL ERROR loading token from SSM: {e}")
     raise e
 
-# --- Funções de Comunicação (sem alterações) ---
+# --- Funções de Comunicação (WhatsApp Cloud API) ---
 
-def _send_whapi_request(endpoint, payload):
+def _to(num):
+    """Destino no formato da Cloud API: só dígitos (aceita JIDs legados '...@s.whatsapp.net')."""
+    return re.sub(r'\D', '', str(num or '').split('@')[0])
+
+def _send_wa(payload):
     headers = {'Authorization': f"Bearer {TOKEN}", 'Content-Type': 'application/json'}
+    payload = {'messaging_product': 'whatsapp', 'recipient_type': 'individual', **payload}
     data_bytes = json.dumps(payload).encode('utf-8')
-    url = f"{API_URL}/{endpoint}"
+    url = f"{GRAPH_API_URL}/{WA_PHONE_NUMBER_ID}/messages"
     req = urllib.request.Request(url, data=data_bytes, headers=headers, method='POST')
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=10) as response:
             if 200 <= response.status < 300: return True
             logger.error(f"Error sending message. Status: {response.status}, Body: {response.read().decode()}")
             return False
+    except urllib.error.HTTPError as e:
+        logger.error(f"HTTP Error {e.code} sending to {payload.get('to')} - Meta Response: {e.read().decode('utf-8')}")
+        return False
     except Exception as e:
-        logger.error(f"Unexpected error in _send_whapi_request: {e}")
+        logger.error(f"Unexpected error in _send_wa: {e}")
         return False
 
-def send_whapi_message(to, body):
-    return _send_whapi_request('messages/text', {'to': to, 'body': body})
+def send_text(to, body):
+    return _send_wa({'to': _to(to), 'type': 'text', 'text': {'body': body, 'preview_url': True}})
 
 def send_main_menu_with_buttons(to):
     menu_body = (
         "Olá! Parece que sua sessão anterior expirou. Vamos começar de novo.\n\n"
         "Selecione uma das opções abaixo 👇:"
     )
-    payload = {"to": to, "type": "button", "header": {"text": "UniConecta CCC!"}, "body": {"text": menu_body}, "action": {"buttons": [{"type": "quick_reply", "id": "menu_emergency", "title": "🚨 Ajuda Imediata"}, {"type": "quick_reply", "id": "menu_ride", "title": "🚗 Carona Solidária"}, {"type": "quick_reply", "id": "menu_chat", "title": "💬 Bate-papo"}]}}
-    return _send_whapi_request('messages/interactive', payload)
+    buttons = [("menu_emergency", "🚨 Ajuda Imediata"), ("menu_ride", "🚗 Carona Solidária"), ("menu_chat", "💬 Bate-papo")]
+    interactive = {"type": "button", "header": {"type": "text", "text": "UniConecta CCCI"}, "body": {"text": menu_body},
+                   "action": {"buttons": [{"type": "reply", "reply": {"id": bid, "title": title}} for bid, title in buttons]}}
+    return _send_wa({"to": _to(to), "type": "interactive", "interactive": interactive})
 
 # --- FUNÇÃO send_nps_survey REMOVIDA ---
 
@@ -110,7 +123,7 @@ def handle_pending_requests(now, start_time_iso):
             message = f"ALERTA SUPERVISOR: A solicitação de ajuda de *{requester_name}* (ID: {item['ID']}) está pendente há mais de 1 hora e não foi atendida."
             
             for supervisor_num in SUPERVISOR_NUMBERS:
-                send_whapi_message(f"{supervisor_num}@s.whatsapp.net", message)
+                send_text(f"{supervisor_num}@s.whatsapp.net", message)
             
             requests_table.update_item(Key={'ID': item['ID']}, UpdateExpression='SET escalated = :val', ExpressionAttributeValues={':val': True})
 
@@ -138,7 +151,7 @@ def handle_stale_conversations(now, start_time_iso):
         last_updated = datetime.fromisoformat(timestamp_str).replace(tzinfo=timezone.utc)
         if last_updated < one_hour_ago:
             user_id = item['ID']
-            user_id_wa = f"{user_id}@s.whatsapp.net"
+            user_id_wa = item.get('wa_jid') or user_id  # número real de onde a pessoa fala
             logger.warning(f"User {user_id} has a stale conversation state ({item['conversation_state']}). Resetting.")
             
             if send_main_menu_with_buttons(user_id_wa):
@@ -173,7 +186,7 @@ def handle_pending_feedback(now):
             continue
 
         logger.info(f"Sending delayed feedback for request {item['ID']} to {target}.")
-        if send_whapi_message(f"{target}@s.whatsapp.net", FEEDBACK_PROMPT):
+        if send_text(f"{target}@s.whatsapp.net", FEEDBACK_PROMPT):
             requests_table.update_item(
                 Key={'ID': item['ID']},
                 UpdateExpression='SET feedback_pending = :false',

@@ -2,6 +2,9 @@ import boto3
 import os
 import re
 import json
+import hmac
+import base64
+import hashlib
 import logging
 import urllib.request
 import time
@@ -9,6 +12,7 @@ import random
 import string
 from datetime import datetime
 from boto3.dynamodb.conditions import Key
+from botocore.exceptions import ClientError
 
 # --- Logger Configuration ---
 logger = logging.getLogger()
@@ -19,12 +23,19 @@ logger.setLevel(logging.INFO)
 DYNAMODB_USERS_TABLE_NAME = os.environ.get('AWS_DYNAMODB_TABLE_NAME_0') or os.environ.get('AWS_DYNAMODB_TABLE_TARGET_NAME_0')
 DYNAMODB_REQUESTS_TABLE_NAME = os.environ.get('AWS_DYNAMODB_TABLE_NAME_1') or os.environ.get('AWS_DYNAMODB_TABLE_TARGET_NAME_1')
 AWS_REGION = os.environ.get('REGION', 'us-east-1')
-API_URL = os.environ.get('API_URL', 'https://gate.whapi.cloud')
 PARAM_NAME_TOKEN = os.environ.get('AWS_SSM_PARAMETER_NAME_0') or os.getenv("AWS_SSM_PARAMETER_TARGET_NAME_0")
 STATUS_INDEX = os.environ.get('STATUS_INDEX_NAME', 'StatusIndex')
 
+# --- WhatsApp Business Cloud API (Meta) ---
+GRAPH_API_URL = os.environ.get('GRAPH_API_URL', 'https://graph.facebook.com/v26.0').rstrip('/')
+WA_PHONE_NUMBER_ID = os.environ.get('WA_PHONE_NUMBER_ID')
+WA_VERIFY_TOKEN = os.environ.get('WA_VERIFY_TOKEN')        # verificação do webhook (GET hub.challenge)
+WA_APP_SECRET = os.environ.get('WA_APP_SECRET')            # opcional: valida X-Hub-Signature-256
+WA_TEMPLATE_ALERT = os.environ.get('WA_TEMPLATE_ALERT', 'alerta_rede_apoio')
+WA_TEMPLATE_LANG = os.environ.get('WA_TEMPLATE_LANG', 'pt_BR')
+
 # --- Initial Validations ---
-if not DYNAMODB_USERS_TABLE_NAME or not DYNAMODB_REQUESTS_TABLE_NAME or not PARAM_NAME_TOKEN:
+if not DYNAMODB_USERS_TABLE_NAME or not DYNAMODB_REQUESTS_TABLE_NAME or not PARAM_NAME_TOKEN or not WA_PHONE_NUMBER_ID:
     logger.error("CRITICAL ERROR: Essential environment variables not configured.")
     raise ValueError("Incomplete environment configuration.")
 
@@ -97,105 +108,95 @@ MESSAGES = {
 
 # --- Auxiliary Functions ---
 
-def _send_whapi_request(endpoint, payload):
-    headers = {
-        'Authorization': f"Bearer {TOKEN}", 
-        'Content-Type': 'application/json',
-        # ADD THIS LINE:
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    }
-    
+def _to(num):
+    """Destino no formato da Cloud API: só dígitos (aceita JIDs legados '...@s.whatsapp.net')."""
+    return re.sub(r'\D', '', str(num or '').split('@')[0])
+
+def _send_wa(payload):
+    headers = {'Authorization': f"Bearer {TOKEN}", 'Content-Type': 'application/json'}
+    payload = {'messaging_product': 'whatsapp', 'recipient_type': 'individual', **payload}
     data_bytes = json.dumps(payload).encode('utf-8')
-    url = f"{API_URL}/{endpoint}"
+    url = f"{GRAPH_API_URL}/{WA_PHONE_NUMBER_ID}/messages"
     req = urllib.request.Request(url, data=data_bytes, headers=headers, method='POST')
 
     try:
-        with urllib.request.urlopen(req) as response:
-            if 200 <= response.status < 300: 
+        with urllib.request.urlopen(req, timeout=10) as response:
+            if 200 <= response.status < 300:
                 return True
-            else: 
-                logger.error(f"Error sending message. Status: {response.status}, Body: {response.read().decode()}")
-                return False
+            logger.error(f"Error sending message. Status: {response.status}, Body: {response.read().decode()}")
+            return False
     except urllib.error.HTTPError as e:
-        # This will catch the 403 and read the actual JSON error from Whapi
+        # Lê o JSON de erro da Meta (error.code / error.message / error_data.details)
         error_body = e.read().decode('utf-8')
-        logger.error(f"HTTP Error {e.code}: {e.reason} - Payload Sent: {json.dumps(payload)} - Whapi Response: {error_body}")
+        logger.error(f"HTTP Error {e.code}: {e.reason} - Payload Sent: {json.dumps(payload)} - Meta Response: {error_body}")
         return False
-    except urllib.error.URLError as e: 
+    except urllib.error.URLError as e:
         logger.error(f"Connection error: {e.reason}")
         return False
-    except Exception as e: 
+    except Exception as e:
         logger.error(f"Unexpected error: {e}")
         return False
 
-def send_whapi_message(to, body): 
-    return _send_whapi_request('messages/text', {'to': to, 'body': body})
+def send_text(to, body):
+    return _send_wa({'to': _to(to), 'type': 'text', 'text': {'body': body, 'preview_url': True}})
 
-# --- NEW HELPER: Standardized to match the new WhatsApp/Whapi schema ---
 def send_interactive_message(to, msg_type, body_text, action_dict, header_text=None, footer_text=None):
-    payload = {
-        "to": to,
-        "type": msg_type,
-        "body": {"text": body_text},
-        "action": action_dict
-    }
-    
+    interactive = {"type": msg_type, "body": {"text": body_text}, "action": action_dict}
     if header_text:
-        payload["header"] = {"text": header_text}
+        interactive["header"] = {"type": "text", "text": header_text}
     if footer_text:
-        payload["footer"] = {"text": footer_text}
-        
-    return _send_whapi_request('messages/interactive', payload)
+        interactive["footer"] = {"text": footer_text}
+    return _send_wa({"to": _to(to), "type": "interactive", "interactive": interactive})
+
+def _tpl_param(value, limit=500):
+    """Parâmetro de template: a Meta rejeita quebras de linha, tabs e >4 espaços seguidos."""
+    text = re.sub(r'\s*\n\s*', ' | ', str(value or '-'))
+    text = re.sub(r'[\t ]+', ' ', text).strip() or '-'
+    return text[:limit]
+
+def send_template(to, name, body_params, button_payloads=None):
+    components = [{"type": "body",
+                   "parameters": [{"type": "text", "text": _tpl_param(p)} for p in body_params]}]
+    for i, payload in enumerate(button_payloads or []):
+        components.append({"type": "button", "sub_type": "quick_reply", "index": str(i),
+                           "parameters": [{"type": "payload", "payload": payload}]})
+    return _send_wa({"to": _to(to), "type": "template",
+                     "template": {"name": name, "language": {"code": WA_TEMPLATE_LANG}, "components": components}})
+
+def _buttons(*pairs):
+    return {"buttons": [{"type": "reply", "reply": {"id": bid, "title": title}} for bid, title in pairs]}
 
 def send_main_menu_with_buttons(to):
-    action = {
-        "buttons": [
-            {"type": "quick_reply", "id": "menu_emergency", "title": "🚨 Ajuda Urgente"}, 
-            {"type": "quick_reply", "id": "menu_ride", "title": "🚗 Carona Solidária"}, 
-            {"type": "quick_reply", "id": "menu_chat", "title": "💬 Bate-papo"}
-        ]
-    }
+    action = _buttons(("menu_emergency", "🚨 Ajuda Urgente"),
+                      ("menu_ride", "🚗 Carona Solidária"),
+                      ("menu_chat", "💬 Bate-papo"))
     return send_interactive_message(to, "button", MESSAGES['menu_body'], action, header_text="UniConecta CCCI")
 
-def send_alert_with_buttons(to, body_text, request_id):
-    action = {
-        "buttons": [
-            {"type": "quick_reply", "id": f"accept_{request_id}", "title": "✅ Aceitar"},
-            {"type": "quick_reply", "id": f"decline_{request_id}", "title": "❌ Indisponível"}
-        ]
-    }
-    return send_interactive_message(to, "button", body_text, action)
+def send_alert_template(to, requester_label, alert_label, details, request_id):
+    """Alerta para a rede: template UTILITY (entregue mesmo fora da janela de 24h).
+    Os payloads dos botões mantêm os IDs accept_/decline_ que o roteador já trata."""
+    return send_template(to, WA_TEMPLATE_ALERT,
+                         [requester_label, alert_label, details, request_id],
+                         [f"accept_{request_id}", f"decline_{request_id}"])
 
 def send_emergency_type_buttons(to):
-    # CRITICAL FIX: Titles shortened to stay under WhatsApp's 20 character limit
-    action = {
-        "buttons": [
-            {"type": "quick_reply", "id": "emergency_type_seguranca", "title": "Saúde ou Segurança"},
-            {"type": "quick_reply", "id": "emergency_type_emocional", "title": "Apoio Emocional"},
-            {"type": "quick_reply", "id": "emergency_type_atividade", "title": "Atividades/Evento"}
-        ]
-    }
+    # Títulos com no máximo 20 caracteres (limite do WhatsApp)
+    action = _buttons(("emergency_type_seguranca", "Saúde ou Segurança"),
+                      ("emergency_type_emocional", "Apoio Emocional"),
+                      ("emergency_type_atividade", "Atividades/Evento"))
     return send_interactive_message(to, "button", MESSAGES['emergency_new_type_prompt'], action)
 
 def send_emergency_timing_buttons(to):
-    # CRITICAL FIX: Titles shortened to stay under WhatsApp's 20 character limit
-    action = {
-        "buttons": [
-            {"type": "quick_reply", "id": "emergency_timing_hoje", "title": "Hoje (Urgente)"},
-            {"type": "quick_reply", "id": "emergency_timing_24h", "title": "Nas próximas 24h"},
-            {"type": "quick_reply", "id": "emergency_timing_semana", "title": "Dentro da semana"}
-        ]
-    }
+    # Títulos com no máximo 20 caracteres (limite do WhatsApp)
+    action = _buttons(("emergency_timing_hoje", "Hoje (Urgente)"),
+                      ("emergency_timing_24h", "Nas próximas 24h"),
+                      ("emergency_timing_semana", "Dentro da semana"))
     return send_interactive_message(to, "button", MESSAGES['emergency_new_timing_prompt'], action)
-    
+
 def send_ride_type_buttons(to):
-    action = {
-        "buttons": [
-            {"type": "quick_reply", "id": "ride_type_medical", "title": "1- Consulta Médica"}, 
-            {"type": "quick_reply", "id": "ride_type_pharmacy", "title": "2- Farmácia"}, 
-            {"type": "quick_reply", "id": "ride_type_other", "title": "3- Outro lugar"}
-        ]
-    }
+    action = _buttons(("ride_type_medical", "1- Consulta Médica"),
+                      ("ride_type_pharmacy", "2- Farmácia"),
+                      ("ride_type_other", "3- Outro lugar"))
     return send_interactive_message(to, "button", MESSAGES['ride_intro'], action)
 
 
@@ -293,7 +294,7 @@ def send_target(user_id):
 def generate_request_id():
     return f"{''.join(random.choices(string.ascii_uppercase, k=3))}-{''.join(random.choices(string.digits, k=3))}"
 
-def create_and_notify_request(sender_id, user_info, request_type, message_template, user_input="", confirmation_message_key='ride_confirm_generic'):
+def create_and_notify_request(sender_id, user_info, request_type, alert_label, user_input="", confirmation_message_key='ride_confirm_generic'):
     # Usa o ID canônico armazenado (resolve o 9º dígito), não o JID recebido.
     user_id_clean = user_info.get('ID') or sender_id.replace('@s.whatsapp.net', '').replace('@c.us', '')
     requester_wa = re.sub(r'\D', '', sender_id.split('@')[0]) or user_id_clean  # JID real de quem pediu
@@ -301,7 +302,7 @@ def create_and_notify_request(sender_id, user_info, request_type, message_templa
     # Notifica TODA a rede aprovada (menos o solicitante), não só a lista de contatos.
     network = get_approved_numbers(exclude_id=user_id_clean)  # [(id, target)]
     if not network:
-        send_whapi_message(sender_id, MESSAGES['erro_sem_contato_emergencia'])
+        send_text(sender_id, MESSAGES['erro_sem_contato_emergencia'])
         update_user_data(user_id_clean, 'initial')
         return
 
@@ -316,15 +317,16 @@ def create_and_notify_request(sender_id, user_info, request_type, message_templa
         })
     except Exception as e:
         logger.error(f"Error creating request in DynamoDB: {e}")
-        send_whapi_message(sender_id, "An internal error occurred while creating your request.")
+        send_text(sender_id, "An internal error occurred while creating your request.")
         update_user_data(user_id_clean, 'initial')
         return
 
-    final_message_text = message_template.format(user_name=user_name, user_number=user_id_clean, user_input=user_input, request_id=request_id)
-    # Envia o alerta para o JID real de cada membro da rede.
+    requester_label = f"{user_name} ({user_id_clean})"
+    # Envia o alerta (template) para o número real de cada membro da rede.
     success_count = sum(1 for _, target in network
-                        if send_alert_with_buttons(f"{str(target).strip()}@s.whatsapp.net", final_message_text, request_id))
-    send_whapi_message(sender_id, MESSAGES[confirmation_message_key] if success_count > 0 else MESSAGES['erro_envio_notificacao'])
+                        if send_alert_template(str(target).strip(), requester_label, alert_label, user_input, request_id))
+    logger.info(f"Request {request_id}: alert delivered to Meta for {success_count}/{len(network)} members.")
+    send_text(sender_id, MESSAGES[confirmation_message_key] if success_count > 0 else MESSAGES['erro_envio_notificacao'])
     update_user_data(user_id_clean, 'initial')
 
 def handle_acceptance(accepter_id, request_id):
@@ -337,7 +339,7 @@ def handle_acceptance(accepter_id, request_id):
         return
 
     if not request_item or request_item.get('status') != 'pendente':
-        send_whapi_message(accepter_id, MESSAGES['erro_solicitacao_nao_encontrada' if not request_item else 'erro_solicitacao_ja_aceita'])
+        send_text(accepter_id, MESSAGES['erro_solicitacao_nao_encontrada' if not request_item else 'erro_solicitacao_ja_aceita'])
         return
 
     accepter_info, accepter_id_clean = find_user(accepter_id_clean)  # resolve 9º dígito
@@ -361,44 +363,124 @@ def handle_acceptance(accepter_id, request_id):
     requester_id = request_item['requester_id']
     # Envia para o JID REAL do solicitante (resolve o 9º dígito no envio).
     requester_target = request_item.get('requester_wa') or requester_id
-    requester_id_wa = f"{requester_target}@s.whatsapp.net"
+    requester_id_wa = requester_target
     accepter_link = f"https://wa.me/{accepter_id_clean}"
     requester_link = f"https://wa.me/{requester_id}"
 
     # Envia confirmação para o solicitante
-    send_whapi_message(requester_id_wa, MESSAGES['solicitacao_aceita_para_solicitante'].format(accepter_name=accepter_name, accepter_link=accepter_link))
+    send_text(requester_id_wa, MESSAGES['solicitacao_aceita_para_solicitante'].format(accepter_name=accepter_name, accepter_link=accepter_link))
 
     # A mensagem de feedback NÃO é enviada aqui: o monitor (chatbot_check.py) a envia
     # ~10-15 min depois, para não competir com o atendimento (feedback_pending=True acima).
 
     # Envia confirmação para quem aceitou (JID real do clique)
-    send_whapi_message(accepter_id, MESSAGES['confirmacao_aceite_para_aceitante'].format(requester_name=request_item['requester_name'], requester_link=requester_link))
+    send_text(accepter_id, MESSAGES['confirmacao_aceite_para_aceitante'].format(requester_name=request_item['requester_name'], requester_link=requester_link))
 
     # Notifica os outros contatos (no JID real de cada um)
     for contact_num in request_item.get('contact_list', []):
         cid = str(contact_num).strip()
         if cid not in [accepter_id_clean, requester_id]:
-            send_whapi_message(f"{send_target(cid)}@s.whatsapp.net", MESSAGES['notificacao_outros_contatos'].format(requester_name=request_item['requester_name']))
+            send_text(send_target(cid), MESSAGES['notificacao_outros_contatos'].format(requester_name=request_item['requester_name']))
 
 # --- Main Lambda Handler ---
 
+def _http_method(event):
+    return (event.get('httpMethod')
+            or event.get('requestContext', {}).get('http', {}).get('method') or 'POST')
+
+
+def _raw_body(event):
+    raw = event.get('body') or ''
+    if event.get('isBase64Encoded') and isinstance(raw, str):
+        raw = base64.b64decode(raw).decode('utf-8')
+    return raw
+
+
+def _plain(status_code, text):
+    return {'statusCode': status_code, 'headers': {'Content-Type': 'text/plain'}, 'body': text}
+
+
+def handle_verification(event):
+    """GET do webhook: a Meta envia hub.mode/hub.verify_token/hub.challenge."""
+    params = event.get('queryStringParameters') or {}
+    if params.get('hub.mode') == 'subscribe' and WA_VERIFY_TOKEN and params.get('hub.verify_token') == WA_VERIFY_TOKEN:
+        return _plain(200, params.get('hub.challenge', ''))
+    logger.warning("Webhook verification failed (mode/token mismatch).")
+    return _plain(403, 'Forbidden')
+
+
+def valid_signature(event, raw):
+    """X-Hub-Signature-256 = HMAC-SHA256(app secret, corpo bruto). Ignorado se WA_APP_SECRET não estiver definido."""
+    if not WA_APP_SECRET:
+        return True
+    headers = {k.lower(): v for k, v in (event.get('headers') or {}).items()}
+    received = headers.get('x-hub-signature-256', '')
+    expected = 'sha256=' + hmac.new(WA_APP_SECRET.encode(), raw.encode('utf-8'), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(received, expected)
+
+
+def iter_incoming(body):
+    """Achata o payload da Meta (entry[].changes[].value) em mensagens; loga statuses com falha."""
+    for entry in body.get('entry', []):
+        for change in entry.get('changes', []):
+            value = change.get('value', {})
+            for st in value.get('statuses', []):
+                if st.get('status') == 'failed':
+                    logger.error(f"Delivery FAILED to {st.get('recipient_id')} (wamid {st.get('id')}): {json.dumps(st.get('errors'))}")
+            for message in value.get('messages', []):
+                yield message
+
+
+def message_action_id(message):
+    """ID do botão clicado: interactive (button/list reply) ou quick reply de template (button.payload)."""
+    interactive = message.get('interactive', {})
+    return (interactive.get('button_reply', {}).get('id')
+            or interactive.get('list_reply', {}).get('id')
+            or message.get('button', {}).get('payload'))
+
+
+def already_processed(user_id, wamid):
+    """A Meta pode reentregar o mesmo webhook: grava o último wamid e ignora repetidos."""
+    if not wamid:
+        return False
+    try:
+        users_table.update_item(Key={'ID': user_id},
+            UpdateExpression='SET last_wamid = :w',
+            ConditionExpression='attribute_not_exists(last_wamid) OR last_wamid <> :w',
+            ExpressionAttributeValues={':w': wamid})
+        return False
+    except ClientError as e:
+        if e.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            return True
+        logger.error(f"Error recording wamid for '{user_id}': {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Error recording wamid for '{user_id}': {e}")
+        return False
+
+
 def lambda_handler(event, context):
     try:
-        body = json.loads(event.get('body', '{}')) if isinstance(event.get('body'), str) else event
-        logger.info(f"Received body: {json.dumps(body)}")
-        
-        for message in body.get('messages', []):
-            if message.get('from_me'): continue
+        if _http_method(event) == 'GET':
+            return handle_verification(event)
 
-            sender_id = message.get('chat_id') or message.get('from')
-            user_id_clean = sender_id.replace('@s.whatsapp.net', '').replace('@c.us', '')
-            incoming_jid = re.sub(r'\D', '', str(user_id_clean))  # JID real de onde veio a msg
+        if isinstance(event.get('body'), str):
+            raw = _raw_body(event)
+            if not valid_signature(event, raw):
+                logger.warning("Invalid X-Hub-Signature-256; request rejected.")
+                return _plain(401, 'Invalid signature')
+            body = json.loads(raw or '{}')
+        else:
+            body = event
+        logger.info(f"Received body: {json.dumps(body)}")
+
+        for message in iter_incoming(body):
+            sender_id = message.get('from', '')
+            user_id_clean = sender_id
+            incoming_jid = re.sub(r'\D', '', str(sender_id))  # número real de onde veio a msg
 
             text_input = message.get('text', {}).get('body', '').strip()
-            
-            button_reply_id = message.get('reply', {}).get('buttons_reply', {}).get('id')
-            list_reply_id = message.get('reply', {}).get('list_reply', {}).get('id')
-            action_id = button_reply_id or list_reply_id
+            action_id = message_action_id(message)
 
             if action_id: logger.info(f"Received ACTION_ID: '{action_id}'")
             if text_input: logger.info(f"Received TEXT_INPUT: '{text_input}'")
@@ -406,12 +488,16 @@ def lambda_handler(event, context):
             # --- Authenticated User Flow (tolerante ao 9º dígito) ---
             user_info, user_id_clean = find_user(user_id_clean)
             if not user_info:
-                send_whapi_message(sender_id, MESSAGES['erro_usuario_nao_encontrado'])
+                send_text(sender_id, MESSAGES['erro_usuario_nao_encontrado'])
+                continue
+
+            if already_processed(user_id_clean, message.get('id')):
+                logger.info(f"Duplicate webhook for wamid {message.get('id')}; skipping.")
                 continue
 
             # Só atendemos voluntários com cadastro aprovado pela Comissão.
             if user_info.get('status') != 'approved':
-                send_whapi_message(sender_id, MESSAGES['cadastro_em_analise'])
+                send_text(sender_id, MESSAGES['cadastro_em_analise'])
                 continue
 
             # Memoriza o JID real de onde a pessoa fala (para entregar no número certo).
@@ -432,8 +518,12 @@ def lambda_handler(event, context):
                 if 'accept_' in action_id: 
                     handle_acceptance(sender_id, action_id.split('_')[-1])
                     continue
-                elif 'decline_' in action_id: 
-                    send_whapi_message(sender_id, MESSAGES['confirmacao_recusa_para_recusante'])
+                elif 'decline_' in action_id:
+                    send_text(sender_id, MESSAGES['confirmacao_recusa_para_recusante'])
+                    continue
+                elif action_id == 'open_menu':  # botão do template de boas-vindas
+                    send_main_menu_with_buttons(sender_id)
+                    update_user_data(user_id_clean, 'initial')
                     continue
                 
                 # --- FLUXO AJUDA URGENTE (2 ETAPAS) ---
@@ -466,15 +556,9 @@ def lambda_handler(event, context):
                     elif type_choice_id == 'seguranca': type_choice_text = "Questão de saúde ou segurança"
 
                     if timing_choice_text and type_choice_text:
-                        user_input_details = f"Tipo de Ajuda: *{type_choice_text}*\nQuando: *{timing_choice_text}*"
-                        template = (
-                            f"🚨 ALERTA - AJUDA URGENTE 🚨\n"
-                            f"*{{user_name}}* ({{user_number}}) precisa de ajuda.\n\n"
-                            f"Detalhes da Solicitação:\n"
-                            f"{user_input_details}"
-                        )
+                        user_input_details = f"{type_choice_text} - Quando: {timing_choice_text}"
                         request_type = f"emergency_{type_choice_id}"
-                        create_and_notify_request(sender_id, user_info, request_type, template, user_input_details, confirmation_message_key='emergency_confirmation')
+                        create_and_notify_request(sender_id, user_info, request_type, "🚨 Ajuda urgente", user_input_details, confirmation_message_key='emergency_confirmation')
                     else:
                         logger.warning(f"Action_id de tempo não reconhecido: '{timing_choice_id}'. Re-perguntando Etapa 2.")
                         send_emergency_timing_buttons(sender_id)
@@ -483,15 +567,15 @@ def lambda_handler(event, context):
                 # --- FLUXO CARONA SOLIDÁRIA ---
                 elif state == 'awaiting_ride_type':
                     if action_id.endswith('ride_type_medical'): 
-                        send_whapi_message(sender_id, MESSAGES['ride_ask_details_medical'])
+                        send_text(sender_id, MESSAGES['ride_ask_details_medical'])
                         update_user_data(user_id_clean, 'awaiting_ride_details_medical')
                         continue
                     elif action_id.endswith('ride_type_pharmacy'): 
-                        send_whapi_message(sender_id, MESSAGES['ride_ask_details_pharmacy'])
+                        send_text(sender_id, MESSAGES['ride_ask_details_pharmacy'])
                         update_user_data(user_id_clean, 'awaiting_ride_details_pharmacy')
                         continue
                     elif action_id.endswith('ride_type_other'): 
-                        send_whapi_message(sender_id, MESSAGES['ride_ask_details_other_step1'])
+                        send_text(sender_id, MESSAGES['ride_ask_details_other_step1'])
                         update_user_data(user_id_clean, 'awaiting_ride_other_step1')
                         continue
 
@@ -506,24 +590,23 @@ def lambda_handler(event, context):
                         update_user_data(user_id_clean, 'awaiting_ride_type')
                         continue
                     elif action_id.endswith('menu_chat'): 
-                        send_whapi_message(sender_id, MESSAGES['pergunta_batepapo'])
+                        send_text(sender_id, MESSAGES['pergunta_batepapo'])
                         update_user_data(user_id_clean, 'awaiting_chat_details')
                         continue
             
             # --- State-based Text Input Flows ---
             if state in ['awaiting_ride_details_medical', 'awaiting_ride_details_pharmacy']:
-                confirmation_key, alert_prefix, request_type = ('ride_confirm_generic', "[CARONA SOLIDÁRIA]", "ride_other")
-                if state == 'awaiting_ride_details_medical': 
-                    confirmation_key, alert_prefix, request_type = ('ride_confirm_medical', "[CARONA P/ CONSULTA]", "ride_medical")
-                elif state == 'awaiting_ride_details_pharmacy': 
-                    alert_prefix, request_type = ("[CARONA P/ FARMÁCIA]", "ride_pharmacy")
-                
-                template = f"{alert_prefix} *{{user_name}}* precisa de carona e informou: _{{user_input}}_"
-                create_and_notify_request(sender_id, user_info, request_type, template, text_input, confirmation_key)
+                confirmation_key, alert_label, request_type = ('ride_confirm_generic', "🚗 Carona solidária", "ride_other")
+                if state == 'awaiting_ride_details_medical':
+                    confirmation_key, alert_label, request_type = ('ride_confirm_medical', "🚗 Carona p/ consulta", "ride_medical")
+                elif state == 'awaiting_ride_details_pharmacy':
+                    alert_label, request_type = ("🚗 Carona p/ farmácia", "ride_pharmacy")
+
+                create_and_notify_request(sender_id, user_info, request_type, alert_label, text_input, confirmation_key)
                 continue
 
             elif state == 'awaiting_ride_other_step1':
-                send_whapi_message(sender_id, MESSAGES['ride_ask_details_other_step2'])
+                send_text(sender_id, MESSAGES['ride_ask_details_other_step2'])
                 update_user_data(user_id_clean, f"awaiting_ride_other_step2|{text_input}")
                 continue
             
@@ -535,20 +618,17 @@ def lambda_handler(event, context):
                     location_details = 'Não informado'
                 
                 user_input_combined = f"Local/Atividade: {location_details}\nDisponibilidade: {timing_details}"
-                template = f"[CARONA SOLIDÁRIA - OUTROS] *{{user_name}}* ({{user_number}}) precisa de apoio e informou:\n\n{user_input_combined}"
-                
-                create_and_notify_request(sender_id, user_info, "ride_other", template, user_input_combined, confirmation_message_key='ride_confirm_other_final')
+                create_and_notify_request(sender_id, user_info, "ride_other", "🚗 Carona solidária - outros", user_input_combined, confirmation_message_key='ride_confirm_other_final')
                 continue
 
             elif state == 'awaiting_chat_details':
-                template = "[BATE-PAPO] *{user_name}* gostaria de conversar e deu os seguintes detalhes: _{user_input}_"
-                create_and_notify_request(sender_id, user_info, "chat", template, text_input, 'ride_confirm_generic')
+                create_and_notify_request(sender_id, user_info, "chat", "💬 Bate-papo", text_input, 'ride_confirm_generic')
                 continue
 
             # --- Default Flow ---
             if not action_id:
                 if text_input and text_input.lower() == 'manual':
-                    send_whapi_message(sender_id, MESSAGES['manual_usabilidade'])
+                    send_text(sender_id, MESSAGES['manual_usabilidade'])
                 
                 logger.info(f"No action_id and no text state match. Sending main menu. State was: {state}")
                 send_main_menu_with_buttons(sender_id)
