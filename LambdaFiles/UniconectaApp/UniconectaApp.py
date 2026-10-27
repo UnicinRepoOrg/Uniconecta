@@ -19,9 +19,44 @@ logger.setLevel(logging.INFO)
 # Aceita as duas convenções de nome (com e sem TARGET) para casar com a infra.
 DYNAMODB_USERS_TABLE_NAME = os.environ.get('AWS_DYNAMODB_TABLE_NAME_0') or os.environ.get('AWS_DYNAMODB_TABLE_TARGET_NAME_0')
 AWS_REGION = os.environ.get('REGION', 'us-east-1')
-JWT_SECRET = os.environ.get('JWT_SECRET')
-ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL')
-ADMIN_PASSWORD_HASH = os.environ.get('ADMIN_PASSWORD_HASH')  # pbkdf2_sha256$<iters>$<salt_b64>$<hash_b64>
+
+# --- Segredos: um parâmetro do SSM (SecureString) com um JSON ---
+# {"JWT_SECRET": "...", "ADMIN_EMAIL": "...", "ADMIN_PASSWORD_HASH": "pbkdf2_sha256$<iters>$<salt_b64>$<hash_b64>",
+#  "ADMINS_JSON": [{"email": "...", "hash": "..."}]  (opcional)}
+# Lido uma vez por cold start. Sem o parâmetro, cai nas variáveis de ambiente de mesmo nome (dev local, e2e).
+CONFIG_PARAM_NAME = os.environ.get('AWS_SSM_PARAMETER_NAME_1') or os.environ.get('CONFIG_PARAMETER_NAME')
+CONFIG_PLACEHOLDER = 'CHANGE_ME_IN_CONSOLE'  # valor dummy criado pela infra; tratado como não configurado
+
+
+def _load_ssm_config():
+    if not CONFIG_PARAM_NAME:
+        return {}
+    try:
+        ssm = boto3.client("ssm", region_name=AWS_REGION)
+        raw = ssm.get_parameter(Name=CONFIG_PARAM_NAME, WithDecryption=True)["Parameter"]["Value"]
+        cfg = json.loads(raw)
+        if not isinstance(cfg, dict):
+            raise ValueError("o JSON do parâmetro não é um objeto")
+        return cfg
+    except Exception as e:
+        # Não loga o valor. Sem config o app não sobe (validação abaixo).
+        logger.error(f"Falha ao ler a configuração do SSM ({CONFIG_PARAM_NAME}): {e}")
+        return {}
+
+
+_CFG = _load_ssm_config()
+
+
+def _cfg(key):
+    value = _CFG.get(key)
+    if value is None:
+        value = os.environ.get(key)
+    return None if value == CONFIG_PLACEHOLDER else value
+
+
+JWT_SECRET = _cfg('JWT_SECRET')
+ADMIN_EMAIL = _cfg('ADMIN_EMAIL')
+ADMIN_PASSWORD_HASH = _cfg('ADMIN_PASSWORD_HASH')  # pbkdf2_sha256$<iters>$<salt_b64>$<hash_b64>
 JWT_TTL_SECONDS = int(os.environ.get('JWT_TTL_SECONDS', '28800'))  # 8h
 ALLOWED_ORIGIN = os.environ.get('ALLOWED_ORIGIN', '*')
 # Prefixo que o CloudFront encaminha (behavior). Removido antes de rotear.
@@ -32,6 +67,9 @@ LISTABLE_STATUSES = ('pending', 'approved', 'rejected')
 
 # --- WhatsApp Cloud API (Meta) — boas-vindas ao aprovar (opcional: sem config, só loga) ---
 PARAM_NAME_TOKEN = os.environ.get('AWS_SSM_PARAMETER_NAME_0') or os.getenv("AWS_SSM_PARAMETER_TARGET_NAME_0")
+if PARAM_NAME_TOKEN and PARAM_NAME_TOKEN == CONFIG_PARAM_NAME:
+    # O parâmetro de segredos nunca é o token do WhatsApp: o token vai no header Authorization para a Meta.
+    PARAM_NAME_TOKEN = None
 GRAPH_API_URL = os.environ.get('GRAPH_API_URL', 'https://graph.facebook.com/v26.0').rstrip('/')
 WA_PHONE_NUMBER_ID = os.environ.get('WA_PHONE_NUMBER_ID')
 WA_TEMPLATE_WELCOME = os.environ.get('WA_TEMPLATE_WELCOME', 'boas_vindas_aprovado')
@@ -41,7 +79,10 @@ WA_TEMPLATE_LANG = os.environ.get('WA_TEMPLATE_LANG', 'pt_BR')
 # ADMINS_JSON = lista [{"email","hash"}]; mesclado com o admin único (fallback).
 ADMINS = {}
 try:
-    for a in json.loads(os.environ.get('ADMINS_JSON', '[]')):
+    _admins = _cfg('ADMINS_JSON') or '[]'
+    if isinstance(_admins, str):
+        _admins = json.loads(_admins)
+    for a in _admins:
         if a.get('email') and a.get('hash'):
             ADMINS[a['email'].strip().lower()] = a['hash']
 except Exception as e:
