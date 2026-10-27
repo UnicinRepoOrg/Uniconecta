@@ -17,12 +17,18 @@ Uso (o import precisa vir antes de qualquer boto3.client/resource):
 Cada chamada ao DynamoDB leva o nome da tabela, que é o que liga a linha do trace à
 caixa da tabela no diagrama. Só envia quando a invocação foi amostrada (Sampled=1).
 Falha ao enviar só é logada: nunca muda a resposta da função.
+
+O CloudFront não envia segmento ao X-Ray. Quando a requisição passou pela CloudFront
+Function do diagrama, ela traz x-cdn-span-id, x-request-start e x-cdn-distribution-id,
+e o traced envia o segmento do CloudFront com esse id: o do API Gateway já está embaixo
+dele, porque a função pôs o mesmo id como Parent no X-Amzn-Trace-Id.
 """
 import functools
 import json
 import logging
 import os
 import random
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -152,7 +158,8 @@ def flush():
         return
     for doc in docs:
         doc['trace_id'] = root
-        doc['parent_id'] = parent
+        if doc.get('type') == 'subsegment':
+            doc['parent_id'] = parent
     global _xray_client
     try:
         if _xray_client is None:
@@ -166,12 +173,64 @@ def flush():
         logger.warning(f"Falha ao enviar subsegmentos ao X-Ray: {e}")
 
 
+# --- Segmento do CloudFront --------------------------------------------------------------
+
+_SPAN_ID = re.compile(r'^[0-9a-f]{16}$')
+_REQUEST_START = re.compile(r'^t=(\d{13})$')
+_DISTRIBUTION_ID = re.compile(r'^[A-Z0-9]{6,32}$')
+
+
+def _headers(event):
+    headers = event.get('headers') if isinstance(event, dict) else None
+    if not isinstance(headers, dict):
+        return {}
+    return {str(k).lower(): str(v) for k, v in headers.items() if v is not None}
+
+
+def _edge_segment(event, response):
+    """Segmento do CloudFront, a partir dos cabeçalhos que a CloudFront Function escreveu."""
+    headers = _headers(event)
+    span_id = headers.get('x-cdn-span-id', '')
+    start = _REQUEST_START.match(headers.get('x-request-start', ''))
+    distribution = headers.get('x-cdn-distribution-id', '')
+    if not (_SPAN_ID.match(span_id) and start and _DISTRIBUTION_ID.match(distribution)):
+        return
+    now = time.time()
+    started = int(start.group(1)) / 1000.0
+    if not (now - 60 <= started <= now + 1):
+        return
+    # O Root do cabeçalho tem de ser o desta invocação: a função escreveu os dois juntos.
+    root, _, _ = _trace_header()
+    incoming = headers.get('x-amzn-trace-id', '')
+    if root and 'Root=' in incoming and f'Root={root}' not in incoming:
+        return
+    doc = {'name': distribution, 'id': span_id, 'start_time': started, 'end_time': now,
+           'http': {'request': {'method': (event.get('httpMethod')
+                                           or event.get('requestContext', {}).get('http', {}).get('method')
+                                           or 'GET'),
+                                'url': f"https://{headers.get('host', '')}{event.get('path') or event.get('rawPath') or ''}"}}}
+    status = response.get('statusCode') if isinstance(response, dict) else None
+    if isinstance(status, int):
+        doc['http']['response'] = {'status': status}
+        if status >= 500:
+            doc['fault'] = True
+        elif status >= 400:
+            doc['error'] = True
+    _pending.append(doc)
+
+
 def traced(handler):
     """Envia os subsegmentos da invocação antes de a função devolver a resposta."""
     @functools.wraps(handler)
     def wrapper(event, context):
+        response = None
         try:
-            return handler(event, context)
+            response = handler(event, context)
+            return response
         finally:
+            try:
+                _edge_segment(event, response)
+            except Exception as e:
+                logger.warning(f"Falha ao montar o segmento do CloudFront: {e}")
             flush()
     return wrapper
