@@ -1,4 +1,5 @@
 import boto3
+import xray_lite  # subsegmentos do X-Ray; precisa vir antes de qualquer boto3.client/resource
 import os
 import re
 import json
@@ -67,7 +68,7 @@ def _send_wa(payload):
     url = f"{GRAPH_API_URL}/{WA_PHONE_NUMBER_ID}/messages"
     req = urllib.request.Request(url, data=data_bytes, headers=headers, method='POST')
     try:
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with xray_lite.urlopen(req, timeout=10) as response:
             if 200 <= response.status < 300: return True
             logger.error(f"Error sending message. Status: {response.status}, Body: {response.read().decode()}")
             return False
@@ -196,6 +197,7 @@ def handle_pending_feedback(now):
 
 # --- Handler Principal da Lambda ---
 
+@xray_lite.traced
 def lambda_handler(event, context):
     logger.info(f"Monitor function triggered at: {datetime.utcnow()}")
     now = datetime.utcnow().replace(tzinfo=timezone.utc)

@@ -1,4 +1,5 @@
 import boto3
+import xray_lite  # subsegmentos do X-Ray; precisa vir antes de qualquer boto3.client/resource
 import os
 import re
 import json
@@ -120,7 +121,7 @@ def _send_wa(payload):
     req = urllib.request.Request(url, data=data_bytes, headers=headers, method='POST')
 
     try:
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with xray_lite.urlopen(req, timeout=10) as response:
             if 200 <= response.status < 300:
                 return True
             logger.error(f"Error sending message. Status: {response.status}, Body: {response.read().decode()}")
@@ -459,6 +460,7 @@ def already_processed(user_id, wamid):
         return False
 
 
+@xray_lite.traced
 def lambda_handler(event, context):
     try:
         if _http_method(event) == 'GET':

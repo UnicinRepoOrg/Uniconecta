@@ -1,4 +1,5 @@
 import boto3
+import xray_lite  # subsegmentos do X-Ray; precisa vir antes de qualquer boto3.client/resource
 import os
 import re
 import time
@@ -229,7 +230,7 @@ def send_welcome_template(item):
         req = urllib.request.Request(f"{GRAPH_API_URL}/{WA_PHONE_NUMBER_ID}/messages",
                                      data=json.dumps(payload).encode('utf-8'), method='POST',
                                      headers={'Authorization': f"Bearer {_wa_token()}", 'Content-Type': 'application/json'})
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with xray_lite.urlopen(req, timeout=10) as response:
             logger.info(f"Welcome template sent to {to}: {response.status}")
             return True
     except urllib.error.HTTPError as e:
@@ -485,6 +486,7 @@ def _normalize_path(event):
     return path.rstrip('/') or '/'
 
 
+@xray_lite.traced
 def lambda_handler(event, context):
     try:
         method = (event.get('httpMethod')
