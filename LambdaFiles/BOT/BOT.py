@@ -67,7 +67,7 @@ MESSAGES = {
         "A partir de agora, você pode contar com este canal simples, seguro e acessível para solicitar apoio sempre que precisar. Estamos com você!\n\n"
         "Tem dúvidas sobre como funciona?\n"
         "Assista ao vídeo explicativo:\n"
-        "👉 {link do video}\n\n"
+        "👉 https://www.youtube.com/watch?v=1RDTkwXRtDQ\n\n"
         "📘 Quer entender melhor como usar?\n"
         "Clique aqui para baixar o Manual de Usabilidade:\n"
         "👉 https://drive.google.com/file/d/1ESrx_r2kdJ1zygNscEKeVmUilJAe4ry9/view?usp=drive_link \n\n"
