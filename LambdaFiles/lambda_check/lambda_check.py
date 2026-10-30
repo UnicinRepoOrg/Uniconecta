@@ -6,6 +6,7 @@ import json
 import logging
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from botocore.exceptions import ClientError
 
 # --- Logger Configuration ---
 logger = logging.getLogger()
@@ -20,6 +21,11 @@ PARAM_NAME_TOKEN = os.environ.get('AWS_SSM_PARAMETER_NAME_0') or os.getenv("AWS_
 # WhatsApp Business Cloud API (Meta)
 GRAPH_API_URL = os.environ.get('GRAPH_API_URL', 'https://graph.facebook.com/v26.0').rstrip('/')
 WA_PHONE_NUMBER_ID = os.environ.get('WA_PHONE_NUMBER_ID')
+WA_TEMPLATE_ALERT = os.environ.get('WA_TEMPLATE_ALERT', 'alerta_rede_apoio')
+WA_TEMPLATE_LANG = os.environ.get('WA_TEMPLATE_LANG', 'pt_BR')
+# Intervalo entre as ondas do envio por proximidade (o BOT grava next_wave_at com o mesmo valor).
+# O agendamento deste monitor precisa rodar a cada 5 min ou menos para respeitar o intervalo.
+WAVE_INTERVAL_MIN = int(os.environ.get('WAVE_INTERVAL_MIN', '15'))
 
 
 # --- Mensagens ---
@@ -90,6 +96,27 @@ def send_main_menu_with_buttons(to):
                    "action": {"buttons": [{"type": "reply", "reply": {"id": bid, "title": title}} for bid, title in buttons]}}
     return _send_wa({"to": _to(to), "type": "interactive", "interactive": interactive})
 
+# Mesmos helpers de template do BOT (BOT.py): o alerta precisa chegar fora da janela de 24h.
+def _tpl_param(value, limit=500):
+    """Parâmetro de template: a Meta rejeita quebras de linha, tabs e >4 espaços seguidos."""
+    text = re.sub(r'\s*\n\s*', ' | ', str(value or '-'))
+    text = re.sub(r'[\t ]+', ' ', text).strip() or '-'
+    return text[:limit]
+
+def send_template(to, name, body_params, button_payloads=None):
+    components = [{"type": "body",
+                   "parameters": [{"type": "text", "text": _tpl_param(p)} for p in body_params]}]
+    for i, payload in enumerate(button_payloads or []):
+        components.append({"type": "button", "sub_type": "quick_reply", "index": str(i),
+                           "parameters": [{"type": "payload", "payload": payload}]})
+    return _send_wa({"to": _to(to), "type": "template",
+                     "template": {"name": name, "language": {"code": WA_TEMPLATE_LANG}, "components": components}})
+
+def send_alert_template(to, requester_label, alert_label, details, request_id):
+    return send_template(to, WA_TEMPLATE_ALERT,
+                         [requester_label, alert_label, details, request_id],
+                         [f"accept_{request_id}", f"decline_{request_id}"])
+
 # --- FUNÇÃO send_nps_survey REMOVIDA ---
 
 
@@ -115,13 +142,23 @@ def get_supervisor_targets():
     return targets
 
 
+def escalate_to_supervisors(request_id, message):
+    supervisors = get_supervisor_targets()
+    if not supervisors:
+        logger.error("No supervisor in the users table (is_supervisor = true, status = approved): overdue request not escalated to anyone.")
+    for supervisor_num in supervisors:
+        send_text(supervisor_num, message)
+    requests_table.update_item(Key={'ID': request_id}, UpdateExpression='SET escalated = :val', ExpressionAttributeValues={':val': True})
+
+
 def handle_pending_requests(now, start_time_iso):
-    """(1) Notificar supervisores sobre solicitações pendentes há mais de 1 hora (criadas nas últimas 2h)."""
+    """(1) Notificar supervisores sobre solicitações pendentes há mais de 1 hora (criadas nas últimas 2h).
+    Só para pedidos enviados à rede toda de uma vez; os em ondas são tratados em handle_wave_expansion."""
     logger.info("Checking for overdue pending requests...")
     one_hour_ago = now - timedelta(hours=1)
     
     response = requests_table.scan(
-        FilterExpression='attribute_not_exists(escalated) AND #st = :status AND creation_timestamp > :start_time',
+        FilterExpression='attribute_not_exists(escalated) AND attribute_not_exists(waves) AND #st = :status AND creation_timestamp > :start_time',
         ExpressionAttributeNames={'#st': 'status'},
         ExpressionAttributeValues={
             ':status': 'pendente',
@@ -140,14 +177,73 @@ def handle_pending_requests(now, start_time_iso):
             logger.warning(f"Request {item['ID']} is overdue. Escalating to supervisors.")
             requester_name = item.get('requester_name', 'N/A')
             message = f"ALERTA SUPERVISOR: A solicitação de ajuda de *{requester_name}* (ID: {item['ID']}) está pendente há mais de 1 hora e não foi atendida."
-            
-            supervisors = get_supervisor_targets()
-            if not supervisors:
-                logger.error("No supervisor in the users table (is_supervisor = true, status = approved): overdue request not escalated to anyone.")
-            for supervisor_num in supervisors:
-                send_text(supervisor_num, message)
-            
-            requests_table.update_item(Key={'ID': item['ID']}, UpdateExpression='SET escalated = :val', ExpressionAttributeValues={':val': True})
+            escalate_to_supervisors(item['ID'], message)
+
+
+def _utc(timestamp_str):
+    return datetime.fromisoformat(timestamp_str).replace(tzinfo=timezone.utc)
+
+
+def send_next_wave(item, now):
+    """Envia a próxima onda de um pedido ainda pendente. O update condicional em
+    waves_sent garante que duas execuções sobrepostas não mandem a mesma onda."""
+    request_id, waves = item['ID'], item.get('waves') or []
+    sent, wave, remaining = int(item.get('waves_sent', 1)), waves[0], waves[1:]
+    updates = 'SET waves = :rest, waves_sent = :next, next_wave_at = :at, contact_list = list_append(contact_list, :ids)'
+    values = {':rest': remaining, ':next': sent + 1, ':cur': sent, ':pendente': 'pendente',
+              ':at': (now + timedelta(minutes=WAVE_INTERVAL_MIN)).replace(tzinfo=None).isoformat(),
+              ':ids': [r['id'] for r in wave]}
+    if not remaining:
+        updates += ', all_notified_at = :now'
+        values[':now'] = now.replace(tzinfo=None).isoformat()
+    try:
+        requests_table.update_item(Key={'ID': request_id}, UpdateExpression=updates,
+                                   ConditionExpression='#st = :pendente AND waves_sent = :cur',
+                                   ExpressionAttributeNames={'#st': 'status'}, ExpressionAttributeValues=values)
+    except ClientError as e:
+        if e.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            logger.info(f"Request {request_id}: accepted or wave already sent by another run; skipping.")
+            return
+        raise
+
+    requester_label = f"{item.get('requester_name', 'N/A')} ({item.get('requester_id', '')})"
+    alert_label = item.get('alert_label') or item.get('request_type', '')
+    success_count = sum(1 for r in wave
+                        if send_alert_template(str(r['to']).strip(), requester_label, alert_label,
+                                               item.get('request_details', ''), request_id))
+    logger.info(f"Request {request_id}: wave {sent + 1} delivered to Meta for {success_count}/{len(wave)} members"
+                f"{' (whole network notified)' if not remaining else ''}.")
+
+
+def handle_wave_expansion(now):
+    """(2) Envio em ondas: a cada WAVE_INTERVAL_MIN amplia um pedido pendente para a
+    próxima onda (mais longe), até a rede toda; WAVE_INTERVAL_MIN depois disso, supervisor."""
+    logger.info("Checking for pending requests to expand...")
+    kwargs = {
+        'FilterExpression': 'attribute_exists(waves) AND attribute_not_exists(escalated) AND #st = :status',
+        'ExpressionAttributeNames': {'#st': 'status'},
+        'ExpressionAttributeValues': {':status': 'pendente'},
+    }
+    while True:
+        response = requests_table.scan(**kwargs)
+        for item in response.get('Items', []):
+            try:
+                if item.get('waves'):
+                    if item.get('next_wave_at') and _utc(item['next_wave_at']) <= now:
+                        send_next_wave(item, now)
+                elif item.get('all_notified_at'):
+                    notified_at = _utc(item['all_notified_at'])
+                    if notified_at <= now - timedelta(minutes=WAVE_INTERVAL_MIN):
+                        minutes = int((now - notified_at).total_seconds() // 60)
+                        logger.warning(f"Request {item['ID']} unanswered after the whole network. Escalating to supervisors.")
+                        message = (f"ALERTA SUPERVISOR: A solicitação de ajuda de *{item.get('requester_name', 'N/A')}* "
+                                   f"(ID: {item['ID']}) foi enviada para toda a rede há {minutes} min e não foi atendida.")
+                        escalate_to_supervisors(item['ID'], message)
+            except Exception as e:
+                logger.error(f"Error expanding request {item.get('ID', 'N/A')}: {e}", exc_info=True)
+        if 'LastEvaluatedKey' not in response:
+            break
+        kwargs['ExclusiveStartKey'] = response['LastEvaluatedKey']
 
 # --- FUNÇÃO handle_accepted_requests REMOVIDA ---
 
@@ -230,6 +326,8 @@ def lambda_handler(event, context):
     try:
         # Passar o novo tempo de início para as funções
         handle_pending_requests(now, two_hours_ago_iso)
+
+        handle_wave_expansion(now)
         
         # --- CHAMADA para handle_accepted_requests REMOVIDA ---
         

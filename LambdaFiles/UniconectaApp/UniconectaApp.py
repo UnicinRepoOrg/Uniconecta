@@ -111,7 +111,7 @@ OPTIONAL_TEXT_FIELDS = [
     'pessoa_chaves', 'profissional_saude', 'alergia_intolerancia',
     'tipo_sanguineo', 'medicacao_continua',
 ]
-EDITABLE_FIELDS = REQUIRED_FIELDS + OPTIONAL_TEXT_FIELDS + ['mora_sozinho']
+EDITABLE_FIELDS = REQUIRED_FIELDS + OPTIONAL_TEXT_FIELDS + ['mora_sozinho', 'cep']
 INTERNAL_FIELDS = {'ID', 'conversation_state', 'state_last_updated', 'lista_contatos'}
 
 
@@ -131,6 +131,13 @@ def canonical_phone(raw):
     if len(digits) in (10, 11):
         return '55' + digits
     return digits
+
+
+def canonical_cep(raw):
+    """'30140-071' -> '30140071'. CEP precisa ter 8 dígitos; senão None.
+    O BOT usa o CEP para avisar primeiro os voluntários mais próximos."""
+    digits = re.sub(r'\D', '', str(raw or ''))
+    return digits if len(digits) == 8 else None
 
 
 def extract_contact_numbers(*free_text_fields):
@@ -356,6 +363,13 @@ def handle_cadastro(event):
     if not phone_id:
         return error(400, "Número de WhatsApp inválido.")
 
+    # CEP é opcional na API (cadastros antigos não têm); se vier, precisa ser válido.
+    cep = None
+    if str(data.get('cep') or '').strip():
+        cep = canonical_cep(data['cep'])
+        if not cep:
+            return error(400, "CEP inválido (8 dígitos).")
+
     if users_table.get_item(Key={'ID': phone_id}).get('Item'):
         return error(409, "Já existe um cadastro com este número de WhatsApp.")
 
@@ -369,6 +383,7 @@ def handle_cadastro(event):
         'idade': idade,
         'endereco': str(data['endereco']).strip(),
         'bairro': str(data['bairro']).strip(),
+        'cep': cep,
         'whatsapp': str(data['whatsapp']).strip(),
         'voluntario_ic': str(data['voluntario_ic']).strip(),
         'mora_sozinho': bool(data.get('mora_sozinho', False)),
@@ -437,6 +452,13 @@ def handle_update_recipient(event, recipient_id):
                 return error(400, "Campo 'idade' deve ser um número.")
         elif field == 'mora_sozinho':
             updates[field] = bool(value)
+        elif field == 'cep':
+            if value in (None, ''):
+                updates[field] = None
+            elif not canonical_cep(value):
+                return error(400, "CEP inválido (8 dígitos).")
+            else:
+                updates[field] = canonical_cep(value)
         else:
             updates[field] = str(value).strip() if value not in (None, '') else None
 
