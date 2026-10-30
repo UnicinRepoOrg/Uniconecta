@@ -41,7 +41,7 @@ WA_TEMPLATE_LANG = os.environ.get('WA_TEMPLATE_LANG', 'pt_BR')
 # broadcast: comportamento antigo (rede toda de uma vez), para rollback sem deploy.
 DISPATCH_MODE = os.environ.get('DISPATCH_MODE', 'broadcast').strip().lower()
 WAVE_INTERVAL_MIN = int(os.environ.get('WAVE_INTERVAL_MIN', '15'))
-MIN_ONDA = int(os.environ.get('MIN_ONDA', '3'))
+MIN_ONDA = int(os.environ.get('MIN_ONDA', '10'))
 
 # --- Initial Validations ---
 if not DYNAMODB_USERS_TABLE_NAME or not DYNAMODB_REQUESTS_TABLE_NAME or not PARAM_NAME_TOKEN or not WA_PHONE_NUMBER_ID:

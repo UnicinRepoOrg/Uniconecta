@@ -31,7 +31,7 @@ python3 tools/whatsapp/create_templates.py --status
 | `WA_TEMPLATE_ALERT` / `WA_TEMPLATE_WELCOME` / `WA_TEMPLATE_LANG` | ✓ | ✓ | ✓ | opcionais: `alerta_rede_apoio` / `boas_vindas_aprovado` / `pt_BR` |
 | `DISPATCH_MODE` | ✓ | | | `broadcast` (padrão: rede toda de uma vez) ou `waves` (ondas por CEP) |
 | `WAVE_INTERVAL_MIN` | ✓ | ✓ | | opcional: `15` (minutos entre ondas e até o supervisor); mesmo valor nas duas |
-| `MIN_ONDA` | ✓ | | | opcional: `3` (mínimo de pessoas por onda) |
+| `MIN_ONDA` | ✓ | | | opcional: `10` (mínimo de pessoas por onda) |
 
 - O papel IAM da **UniconectaApp** precisa de `ssm:GetParameter` (e `kms:Decrypt`, se a chave KMS for própria) nesse parâmetro. Se o envio falhar, a aprovação continua funcionando: só fica um log.
 - Timeout do BOT ≥ 30s (o alerta é enviado em sequência para toda a rede).
@@ -51,7 +51,7 @@ Em vez de avisar a rede toda de uma vez, o BOT avisa primeiro quem mora mais per
 | 3 | mesmos 3 primeiros dígitos |
 | 4 | resto da rede, inclusive quem não tem CEP |
 
-- Cada onda junta níveis até ter pelo menos `MIN_ONDA` pessoas; níveis vazios são pulados.
+- Cada onda junta níveis até ter pelo menos `MIN_ONDA` (10) pessoas: se o mesmo CEP não der 10, amplia para setor/bairro, 4 e 3 dígitos e, se preciso, a rede toda já na 1ª onda. Níveis vazios são pulados.
 - **Ajuda urgente** vai para a rede toda na hora.
 - Com a rede toda avisada e o pedido ainda pendente, o supervisor recebe o alerta `WAVE_INTERVAL_MIN` depois.
 - As ondas são calculadas na criação (`LambdaFiles/BOT/dispatch.py`) e gravadas no pedido: `waves`, `waves_sent`, `next_wave_at`, `all_notified_at`. Pedidos sem `waves` (modo `broadcast`) seguem a regra antiga do supervisor (1h).

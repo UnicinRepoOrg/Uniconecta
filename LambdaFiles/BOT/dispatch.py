@@ -47,7 +47,7 @@ def proximity_level(requester, member):
     return 4
 
 
-def build_waves(requester, members, min_size=3, broadcast=False):
+def build_waves(requester, members, min_size=10, broadcast=False):
     """Divide a rede em ondas. `members` são dicts com 'id', 'to', 'cep', 'bairro'.
     Devolve [[{'id', 'to'}, ...], ...]; com broadcast=True, uma onda só."""
     recipients = [(m, {'id': m['id'], 'to': m['to']}) for m in members]
