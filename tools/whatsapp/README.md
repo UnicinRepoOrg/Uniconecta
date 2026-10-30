@@ -7,7 +7,7 @@ A Meta só aceita mensagem livre (texto, botões) para quem falou com o número 
 
 | Template (UTILITY, pt_BR) | Enviado por | Quando |
 |---|---|---|
-| `alerta_rede_apoio` (`{{1}}` solicitante, `{{2}}` tipo, `{{3}}` detalhes, `{{4}}` código; botões Aceitar / Indisponível) | BOT | nova solicitação → toda a rede aprovada |
+| `alerta_rede_apoio` (`{{1}}` solicitante, `{{2}}` tipo, `{{3}}` detalhes, `{{4}}` código; botões Aceitar / Indisponível) | BOT / lambda_check | nova solicitação → rede aprovada, em ondas por CEP (ver abaixo) |
 | `boas_vindas_aprovado` (`{{1}}` nome; botão Abrir menu) | UniconectaApp | admin muda o status para `approved` |
 
 Envio **best-effort** (livre, pode falhar fora da janela): alerta ao supervisor (`lambda_check`) e o aviso "solicitação já atendida" aos outros membros. As falhas aparecem no CloudWatch do BOT como `Delivery FAILED ... 131047`.
@@ -28,7 +28,10 @@ python3 tools/whatsapp/create_templates.py --status
 | `AWS_SSM_PARAMETER_NAME_0` | ✓ | ✓ | ✓ **novo** | mesmo parâmetro SSM; **valor (SecureString) = access token da Meta** |
 | `WA_VERIFY_TOKEN` | ✓ | | | string aleatória; a mesma no painel de webhook da Meta |
 | `WA_APP_SECRET` | ✓ | | | App → Configurações → Básico → Chave secreta (valida `X-Hub-Signature-256`) |
-| `WA_TEMPLATE_ALERT` / `WA_TEMPLATE_WELCOME` / `WA_TEMPLATE_LANG` | ✓ | | ✓ | opcionais: `alerta_rede_apoio` / `boas_vindas_aprovado` / `pt_BR` |
+| `WA_TEMPLATE_ALERT` / `WA_TEMPLATE_WELCOME` / `WA_TEMPLATE_LANG` | ✓ | ✓ | ✓ | opcionais: `alerta_rede_apoio` / `boas_vindas_aprovado` / `pt_BR` |
+| `DISPATCH_MODE` | ✓ | | | `broadcast` (padrão: rede toda de uma vez) ou `waves` (ondas por CEP) |
+| `WAVE_INTERVAL_MIN` | ✓ | ✓ | | opcional: `15` (minutos entre ondas e até o supervisor); mesmo valor nas duas |
+| `MIN_ONDA` | ✓ | | | opcional: `10` (mínimo de pessoas por onda) |
 
 - O papel IAM da **UniconectaApp** precisa de `ssm:GetParameter` (e `kms:Decrypt`, se a chave KMS for própria) nesse parâmetro. Se o envio falhar, a aprovação continua funcionando: só fica um log.
 - Timeout do BOT ≥ 30s (o alerta é enviado em sequência para toda a rede).
@@ -36,6 +39,28 @@ python3 tools/whatsapp/create_templates.py --status
 
 ## Supervisores
 O alerta de solicitação pendente há mais de 1h (`lambda_check`) vai para os usuários do `DBBot` com **`is_supervisor` = `true`** (Boolean) e `status` = `approved`. Para incluir ou tirar alguém, edite o item no console do DynamoDB. Nenhum número fica no código.
+
+## Envio em ondas por CEP (`DISPATCH_MODE=waves`)
+Em vez de avisar a rede toda de uma vez, o BOT avisa primeiro quem mora mais perto de quem pediu, e o `lambda_check` amplia o envio a cada `WAVE_INTERVAL_MIN` enquanto o pedido estiver pendente:
+
+| Nível | Quem |
+|---|---|
+| 0 | mesmo CEP (8 dígitos): mesmo condomínio ou rua |
+| 1 | mesmos 5 primeiros dígitos do CEP, ou mesmo bairro (sem acento/maiúsculas) |
+| 2 | mesmos 4 primeiros dígitos |
+| 3 | mesmos 3 primeiros dígitos |
+| 4 | resto da rede, inclusive quem não tem CEP |
+
+- Cada onda junta níveis até ter pelo menos `MIN_ONDA` (10) pessoas: se o mesmo CEP não der 10, amplia para setor/bairro, 4 e 3 dígitos e, se preciso, a rede toda já na 1ª onda. Níveis vazios são pulados.
+- **Ajuda urgente** vai para a rede toda na hora.
+- Com a rede toda avisada e o pedido ainda pendente, o supervisor recebe o alerta `WAVE_INTERVAL_MIN` depois.
+- As ondas são calculadas na criação (`LambdaFiles/BOT/dispatch.py`) e gravadas no pedido: `waves`, `waves_sent`, `next_wave_at`, `all_notified_at`. Pedidos sem `waves` (modo `broadcast`) seguem a regra antiga do supervisor (1h).
+- **O agendamento (EventBridge) do `lambda_check` precisa rodar a cada 5 min ou menos**; senão o intervalo real entre ondas fica maior que 15 min.
+- O CEP vem do cadastro (`cep`, 8 dígitos, opcional na API). A quem não tem, o BOT pergunta uma única vez ao abrir o menu (responder `pular` segue sem CEP).
+
+**Campo no formulário do site** (o código-fonte do site não está neste repo): campo `cep` obrigatório, máscara `00000-000`, logo depois de "Bairro", com o texto de ajuda *"Usamos o CEP para avisar primeiro os voluntários que moram mais perto de você."*; enviado no `POST /cadastro` e no `PATCH /recipients/{id}` do admin. A API responde 400 para CEP que não tenha 8 dígitos.
+
+**Ordem de ativação:** deploy das 3 Lambdas → conferir o agendamento do `lambda_check` → `DISPATCH_MODE=waves` no BOT. Para voltar atrás, `DISPATCH_MODE=broadcast`.
 
 ## Checklist de virada (cutover)
 1. Atualizar o valor do parâmetro SSM com o token da Meta e criar as variáveis acima.

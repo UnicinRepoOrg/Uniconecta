@@ -121,9 +121,13 @@ class FakeTable:
         item = self.rows.setdefault(Key['ID'], {'ID': Key['ID']})
         if ConditionExpression and not _eval(ConditionExpression, item, names, values):
             raise ClientError('ConditionalCheckFailedException')
-        for assign in UpdateExpression.replace('SET ', '', 1).split(','):
-            attr, val = [s.strip() for s in assign.split('=')]
-            item[names.get(attr, attr)] = values[val]
+        for assign in re.split(r',(?![^()]*\))', UpdateExpression.replace('SET ', '', 1)):
+            attr, val = [s.strip() for s in assign.split('=', 1)]
+            m = re.match(r'list_append\((\S+),\s*(\S+)\)', val)
+            if m:
+                item[names.get(attr, attr)] = list(item.get(names.get(m.group(1), m.group(1))) or []) + values[m.group(2)]
+            else:
+                item[names.get(attr, attr)] = values[val]
         return {'Attributes': dict(item)} if ReturnValues else {}
 
     def query(self, IndexName, KeyConditionExpression, **_):
@@ -154,8 +158,12 @@ boto3_conditions.Key = _KeyCond
 botocore = types.ModuleType('botocore')
 botocore_exceptions = types.ModuleType('botocore.exceptions')
 botocore_exceptions.ClientError = ClientError
+# X-Ray desligado: traced vira identidade e urlopen passa pela interceptação da Graph API abaixo.
+xray_lite = types.ModuleType('xray_lite')
+xray_lite.traced = lambda fn: fn
+xray_lite.urlopen = lambda *a, **k: urllib.request.urlopen(*a, **k)
 sys.modules.update({'boto3': boto3, 'boto3.dynamodb': boto3_dynamodb, 'boto3.dynamodb.conditions': boto3_conditions,
-                    'botocore': botocore, 'botocore.exceptions': botocore_exceptions})
+                    'botocore': botocore, 'botocore.exceptions': botocore_exceptions, 'xray_lite': xray_lite})
 
 # =====================================================================
 #  Interceptação da Graph API
@@ -235,6 +243,7 @@ os.environ.update({'JWT_SECRET': 'e2e-jwt-secret', 'ADMIN_EMAIL': ADMIN_EMAIL, '
 
 
 def load(name, rel):
+    sys.path.insert(0, os.path.dirname(os.path.join(ROOT, rel)))  # módulos irmãos (xray_lite, dispatch)
     spec = importlib.util.spec_from_file_location(name, os.path.join(ROOT, rel))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -327,13 +336,18 @@ def main():
     ok('login -> 200 + JWT', code == 200 and jwt)
     code, _ = api('GET', '/recipients')
     ok('GET /recipients without token -> 401', code == 401)
-    cadastro = {'nome_completo': 'Teste E2E', 'idade': 40, 'endereco': 'Rua A, 1', 'bairro': 'Centro',
+    code, body = api('POST', '/cadastro', {'nome_completo': 'X', 'idade': 40, 'endereco': 'Rua A, 1', 'bairro': 'Centro',
+                                           'whatsapp': '31900000055', 'voluntario_ic': 'Sim', 'contato_familia': 'Ana',
+                                           'contato_ccci': 'CCCI', 'cep': '3014-007'})
+    ok('POST /cadastro with invalid CEP -> 400', code == 400, json.dumps(body, ensure_ascii=False))
+    cadastro = {'nome_completo': 'Teste E2E', 'idade': 40, 'endereco': 'Rua A, 1', 'bairro': 'Centro', 'cep': '30140-071',
                 'whatsapp': TEST_TO[2:] if TEST_TO.startswith('55') else TEST_TO,
                 'voluntario_ic': 'Sim', 'contato_familia': 'Ana 31 98888-7777', 'contato_ccci': 'CCCI'}
     code, body = api('POST', '/cadastro', cadastro)
     ok('POST /cadastro -> 201 pending', code == 201 and body.get('status') == 'pending', json.dumps(body))
     vid = body.get('id')
     ok('canonical ID equals TEST_TO', vid == TEST_TO, f"{vid} vs {TEST_TO}")
+    ok('CEP stored as 8 digits', USERS.get(vid, {}).get('cep') == '30140071', str(USERS.get(vid, {}).get('cep')))
     code, body = api('GET', '/recipients', token=jwt)
     ok('GET /recipients -> lists the new cadastro', code == 200 and any(r['id'] == vid for r in body['recipients']))
     mark = len(SENT)
@@ -437,10 +451,141 @@ def main():
     ok('overdue request escalated to supervisor', REQS['OLD-001'].get('escalated') is True and any(r['to'] == SUPERVISOR for r in recs))
     ok('monitor messages accepted by Meta', live_ok(recs))
 
+    waves_scenario()
+
     failed = [r for r in RESULTS if not r[1]]
     print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} checks passed. "
           f"Graph calls: {len(SENT)} ({sum(r['live'] for r in SENT)} live).")
     sys.exit(1 if failed else 0)
+
+
+def waves_scenario():
+    """Envio em ondas por CEP (DISPATCH_MODE=waves) + pergunta do CEP no BOT."""
+    print("\n7) Bot asks the CEP once to volunteers without it")
+    NOCEP = '5531900000060'
+    USERS[NOCEP] = {'ID': NOCEP, 'status': 'approved', 'nome_completo': 'Sem CEP', 'conversation_state': 'initial'}
+    mark = len(SENT)
+    webhook(NOCEP, text='oi')
+    recs = sent_since(mark)
+    ok('no CEP -> asks the CEP (not the menu)', len(recs) == 1 and 'CEP' in recs[0]['payload']['text']['body']
+       and USERS[NOCEP]['conversation_state'] == 'awaiting_cep' and USERS[NOCEP].get('cep_asked') is True, show(recs))
+    mark = len(SENT)
+    webhook(NOCEP, text='abc')
+    recs = sent_since(mark)
+    ok('invalid CEP -> asks again once', len(recs) == 1 and USERS[NOCEP]['conversation_state'] == 'awaiting_cep_retry', show(recs))
+    mark = len(SENT)
+    webhook(NOCEP, text='30140-071')
+    recs = sent_since(mark)
+    ok('valid CEP -> saved + menu', USERS[NOCEP].get('cep') == '30140071' and any(r['type'] == 'interactive' for r in recs)
+       and USERS[NOCEP]['conversation_state'] == 'initial', show(recs))
+    SKIP = '5531900000061'
+    USERS[SKIP] = {'ID': SKIP, 'status': 'approved', 'nome_completo': 'Pula', 'conversation_state': 'initial'}
+    webhook(SKIP, text='oi')
+    mark = len(SENT)
+    webhook(SKIP, text='pular')
+    recs = sent_since(mark)
+    ok('"pular" -> menu, no CEP saved', not USERS[SKIP].get('cep') and any(r['type'] == 'interactive' for r in recs), show(recs))
+    mark = len(SENT)
+    webhook(SKIP, text='oi')
+    recs = sent_since(mark)
+    ok('CEP is asked only once', any(r['type'] == 'interactive' for r in recs), show(recs))
+    ASKED = '5531900000062'
+    USERS[ASKED] = {'ID': ASKED, 'status': 'approved', 'nome_completo': 'Botão', 'conversation_state': 'initial'}
+    webhook(ASKED, text='oi')
+    webhook(ASKED, button_id='menu_ride')
+    ok('menu button while asked the CEP -> follows the menu', USERS[ASKED]['conversation_state'] == 'awaiting_ride_type',
+       USERS[ASKED]['conversation_state'])
+
+    print("\n8) Waves by CEP (DISPATCH_MODE=waves, MIN_ONDA=2)")
+    for uid in list(USERS):  # rede limpa para o cenário
+        if uid != SUPERVISOR:
+            del USERS[uid]
+    REQS.clear()
+    now_iso = datetime.utcnow().isoformat()
+    def member(uid, cep=None, bairro='Outro'):
+        USERS[uid] = {'ID': uid, 'status': 'approved', 'nome_completo': f'M{uid[-2:]}', 'cep': cep, 'bairro': bairro,
+                      'conversation_state': 'initial', 'state_last_updated': now_iso, 'cep_asked': True}
+    REQ = '5531900000100'
+    member(REQ, '30140071', 'Lourdes')
+    member('5531900000101', '30140071')            # nível 0: mesmo CEP
+    member('5531900000102', '30140999')            # nível 1: mesmo setor (5 dígitos)
+    member('5531900000103', None, 'lourdes ')      # nível 1: mesmo bairro, sem CEP
+    member('5531900000104', '30145000')            # nível 2
+    member('5531900000105', '30190000')            # nível 3
+    member('5531900000106', '01310000')            # nível 4: outra cidade
+    member('5531900000107')                        # nível 4: sem CEP
+    wave1, wave2 = {'5531900000101', '5531900000102', '5531900000103'}, {'5531900000104', '5531900000105'}
+    wave3 = {'5531900000106', '5531900000107', SUPERVISOR}
+    bot.DISPATCH_MODE, bot.MIN_ONDA = 'waves', 2
+
+    def alerted(recs):
+        return {r['to'] for r in recs if r['template'] == 'alerta_rede_apoio'}
+
+    webhook(REQ, button_id='menu_ride')
+    webhook(REQ, button_id='ride_type_medical')
+    mark = len(SENT)
+    webhook(REQ, text='Amanhã 10h, Hospital X')
+    recs = sent_since(mark)
+    req = next(iter(REQS.values()))
+    ok('ride -> only wave 1 alerted (same CEP, same sector, same bairro)', alerted(recs) == wave1, str(sorted(alerted(recs))))
+    ok('request keeps the remaining waves', len(req['waves']) == 2 and req['waves_sent'] == 1
+       and set(req['contact_list']) == wave1 and 'all_notified_at' not in req)
+
+    mark = len(SENT)
+    check.lambda_handler({}, None)
+    ok('monitor before next_wave_at -> nothing', not alerted(sent_since(mark)))
+    stale = dict(REQS[req['ID']])
+    REQS[req['ID']]['next_wave_at'] = (datetime.utcnow() - timedelta(minutes=1)).isoformat()
+    mark = len(SENT)
+    check.lambda_handler({}, None)
+    recs = sent_since(mark)
+    ok('monitor after 15 min -> wave 2 only', alerted(recs) == wave2, str(sorted(alerted(recs))))
+    ok('contact_list grows with wave 2', set(REQS[req['ID']]['contact_list']) == wave1 | wave2)
+    mark = len(SENT)
+    check.send_next_wave(stale, datetime.utcnow().replace(tzinfo=check.timezone.utc))
+    ok('overlapping run (stale waves_sent) -> no duplicate send', not alerted(sent_since(mark)))
+
+    REQS[req['ID']]['next_wave_at'] = (datetime.utcnow() - timedelta(minutes=1)).isoformat()
+    mark = len(SENT)
+    check.lambda_handler({}, None)
+    recs = sent_since(mark)
+    ok('wave 3 -> rest of the network', alerted(recs) == wave3, str(sorted(alerted(recs))))
+    ok('whole network notified -> all_notified_at, no supervisor yet',
+       REQS[req['ID']].get('all_notified_at') and not REQS[req['ID']].get('escalated')
+       and not any(r['to'] == SUPERVISOR and r['type'] == 'text' for r in recs))
+    REQS[req['ID']]['all_notified_at'] = (datetime.utcnow() - timedelta(minutes=16)).isoformat()
+    mark = len(SENT)
+    check.lambda_handler({}, None)
+    recs = sent_since(mark)
+    ok('15 min after the whole network -> supervisor', REQS[req['ID']].get('escalated') is True
+       and any(r['to'] == SUPERVISOR and r['type'] == 'text' for r in recs), show(recs))
+
+    print("\n9) Waves: accepted requests stop; urgent goes to everyone")
+    REQS.clear()
+    webhook(REQ, button_id='menu_chat')
+    webhook(REQ, text='Hoje à tarde')
+    req = next(iter(REQS.values()))
+    mark = len(SENT)
+    webhook('5531900000101', template_payload=f"accept_{req['ID']}")
+    recs = sent_since(mark)
+    ok('accept in wave 1 -> "already attended" only to wave 1',
+       {r['to'] for r in recs if r['type'] == 'text' and 'já foi atendida' in r['payload']['text']['body']} == wave1 - {'5531900000101'},
+       show(recs))
+    REQS[req['ID']]['next_wave_at'] = (datetime.utcnow() - timedelta(minutes=1)).isoformat()
+    mark = len(SENT)
+    check.lambda_handler({}, None)
+    ok('accepted request -> no more waves', not alerted(sent_since(mark)))
+
+    REQS.clear()
+    webhook(REQ, button_id='menu_emergency')
+    webhook(REQ, button_id='emergency_type_seguranca')
+    mark = len(SENT)
+    webhook(REQ, button_id='emergency_timing_hoje')
+    recs = sent_since(mark)
+    req = next(iter(REQS.values()))
+    ok('urgent -> whole network at once', alerted(recs) == wave1 | wave2 | wave3, str(len(alerted(recs))))
+    ok('urgent -> no pending waves, supervisor clock started', req['waves'] == [] and req.get('all_notified_at'))
+    bot.DISPATCH_MODE = 'broadcast'
 
 
 if __name__ == '__main__':

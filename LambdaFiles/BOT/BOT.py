@@ -11,9 +11,10 @@ import urllib.request
 import time
 import random
 import string
-from datetime import datetime
+from datetime import datetime, timedelta
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
+import dispatch
 
 # --- Logger Configuration ---
 logger = logging.getLogger()
@@ -34,6 +35,13 @@ WA_VERIFY_TOKEN = os.environ.get('WA_VERIFY_TOKEN')        # verificação do we
 WA_APP_SECRET = os.environ.get('WA_APP_SECRET')            # opcional: valida X-Hub-Signature-256
 WA_TEMPLATE_ALERT = os.environ.get('WA_TEMPLATE_ALERT', 'alerta_rede_apoio')
 WA_TEMPLATE_LANG = os.environ.get('WA_TEMPLATE_LANG', 'pt_BR')
+
+# --- Envio em ondas por proximidade (ver dispatch.py) ---
+# waves: avisa primeiro quem mora mais perto; o lambda_check amplia a cada WAVE_INTERVAL_MIN.
+# broadcast: comportamento antigo (rede toda de uma vez), para rollback sem deploy.
+DISPATCH_MODE = os.environ.get('DISPATCH_MODE', 'broadcast').strip().lower()
+WAVE_INTERVAL_MIN = int(os.environ.get('WAVE_INTERVAL_MIN', '15'))
+MIN_ONDA = int(os.environ.get('MIN_ONDA', '10'))
 
 # --- Initial Validations ---
 if not DYNAMODB_USERS_TABLE_NAME or not DYNAMODB_REQUESTS_TABLE_NAME or not PARAM_NAME_TOKEN or not WA_PHONE_NUMBER_ID:
@@ -103,6 +111,13 @@ MESSAGES = {
     'ride_confirm_other_final': "Tudo certo! Um voluntário da nossa rede de apoio vai falar com você no privado pra combinar direitinho! (não precisa responder essa mensagem)",
     'ride_confirm_medical': "Pronto, sua solicitação foi enviada aos voluntários mais próximos! \n Normalmente, alguém retorna em até 30 min a 1 hora. \nSe não houver resposta nesse período, procure ajuda de alguém conhecido ou alguém mais próximo de você.",
     'ride_confirm_generic': "Pronto, sua solicitação foi enviada aos voluntários mais próximos! \n Normalmente, alguém retorna em até 30 min a 1 hora. \nSe não houver resposta nesse período, procure ajuda de alguém conhecido ou alguém mais próximo de você.",
+    'pergunta_cep': (
+        "Antes de continuar: qual é o CEP da sua casa? 🏠\n"
+        "Com ele avisamos primeiro os voluntários que moram mais perto quando você ou alguém da rede precisar de ajuda.\n\n"
+        "Responda só com os números (ex.: 00000-000) ou escreva *pular*."
+    ),
+    'cep_invalido': "Não reconheci esse CEP. Ele tem 8 números (ex.: 00000-000). Tente de novo ou escreva *pular*.",
+    'cep_salvo': "Obrigado! CEP salvo. 🙌",
     'feedback_prompt': (
         "A sua opinião é muito importante para nós! Estamos sempre em busca de evoluir a usabilidade e a experiência da Rede UniConecta CCCI.\n\n"
         "Se quiser contribuir com sugestões, críticas construtivas ou melhorias, envie um e-mail para: uniconecta@unicin.org\n\n"
@@ -247,24 +262,26 @@ def display_name(user_info):
             or 'Voluntário(a)')
 
 
-def get_approved_numbers(exclude_id=None):
-    """Rede aprovada via Query no GSI (sem Scan). Retorna [(id, target)] onde
-    target é o wa_jid real (se conhecido) ou o próprio id — para entrega correta."""
-    pairs, kwargs = [], {'IndexName': STATUS_INDEX,
-                         'KeyConditionExpression': Key('status').eq('approved')}
+def get_approved_members(exclude_id=None):
+    """Rede aprovada via Query no GSI (sem Scan). Retorna dicts com 'id', 'to'
+    (wa_jid real, se conhecido, ou o próprio id — para entrega correta) e
+    'cep'/'bairro' (para o envio em ondas por proximidade)."""
+    members, kwargs = [], {'IndexName': STATUS_INDEX,
+                           'KeyConditionExpression': Key('status').eq('approved')}
     try:
         while True:
             response = users_table.query(**kwargs)
             for it in response.get('Items', []):
                 uid = it.get('ID')
                 if uid and uid != exclude_id:
-                    pairs.append((uid, it.get('wa_jid') or uid))
+                    members.append({'id': uid, 'to': it.get('wa_jid') or uid,
+                                    'cep': it.get('cep'), 'bairro': it.get('bairro')})
             if 'LastEvaluatedKey' not in response:
                 break
             kwargs['ExclusiveStartKey'] = response['LastEvaluatedKey']
     except Exception as e:
         logger.error(f"Error querying approved users: {e}")
-    return pairs
+    return members
 
 def update_user_data(user_id, state, wa_jid=None):
     try:
@@ -278,6 +295,29 @@ def update_user_data(user_id, state, wa_jid=None):
         logger.info(f"User data for '{user_id}' updated. New state: '{state}'.")
     except Exception as e:
         logger.error(f"Error updating data for user '{user_id}': {e}")
+
+
+def save_user_fields(user_id, **fields):
+    try:
+        names = {f"#f{i}": k for i, k in enumerate(fields)}
+        values = {f":v{i}": v for i, v in enumerate(fields.values())}
+        users_table.update_item(Key={'ID': user_id},
+                                UpdateExpression='SET ' + ', '.join(f"#f{i} = :v{i}" for i in range(len(fields))),
+                                ExpressionAttributeNames=names, ExpressionAttributeValues=values)
+    except Exception as e:
+        logger.error(f"Error saving {list(fields)} for user '{user_id}': {e}")
+
+
+def send_menu_or_ask_cep(sender_id, user_id, user_info):
+    """Menu principal. Antes, pergunta o CEP uma única vez a quem ainda não tem
+    (o CEP define quem é avisado primeiro no envio em ondas)."""
+    if not user_info.get('cep') and not user_info.get('cep_asked'):
+        save_user_fields(user_id, cep_asked=True)
+        send_text(sender_id, MESSAGES['pergunta_cep'])
+        update_user_data(user_id, 'awaiting_cep')
+        return
+    send_main_menu_with_buttons(sender_id)
+    update_user_data(user_id, 'initial')
 
 
 def send_target(user_id):
@@ -304,22 +344,38 @@ def create_and_notify_request(sender_id, user_info, request_type, alert_label, u
     user_id_clean = user_info.get('ID') or sender_id.replace('@s.whatsapp.net', '').replace('@c.us', '')
     requester_wa = re.sub(r'\D', '', sender_id.split('@')[0]) or user_id_clean  # JID real de quem pediu
     user_name = display_name(user_info)  # nome preferido (fallback: nome completo)
-    # Notifica TODA a rede aprovada (menos o solicitante), não só a lista de contatos.
-    network = get_approved_numbers(exclude_id=user_id_clean)  # [(id, target)]
+    # Rede aprovada (menos o solicitante), não só a lista de contatos.
+    network = get_approved_members(exclude_id=user_id_clean)
     if not network:
         send_text(sender_id, MESSAGES['erro_sem_contato_emergencia'])
         update_user_data(user_id_clean, 'initial')
         return
 
-    contact_list = [uid for uid, _ in network]  # IDs canônicos (matching do aceite)
+    # Em modo waves, a 1ª onda vai para os mais próximos (CEP/bairro) e o lambda_check
+    # amplia o resto. Urgência vai para a rede toda de uma vez.
+    use_waves = DISPATCH_MODE == 'waves'
+    waves = dispatch.build_waves(user_info, network, min_size=MIN_ONDA,
+                                 broadcast=not use_waves or request_type.startswith('emergency_'))
+    first_wave, pending_waves = waves[0], waves[1:]
+
+    contact_list = [r['id'] for r in first_wave]  # IDs canônicos de quem foi avisado (matching do aceite)
     request_id = generate_request_id()
+    now = datetime.utcnow()
+    item = {
+        'ID': request_id, 'requester_id': user_id_clean, 'requester_name': user_name,
+        'requester_wa': requester_wa, 'contact_list': contact_list, 'status': 'pendente',
+        'creation_timestamp': now.isoformat(), 'request_type': request_type,
+        'request_details': user_input, 'ttl': int(time.time()) + 86400
+    }
+    if use_waves:
+        # O lambda_check lê estes campos: envia a próxima onda em next_wave_at e, com a
+        # rede toda avisada (waves vazio), escala ao supervisor WAVE_INTERVAL_MIN depois.
+        item.update({'alert_label': alert_label, 'waves': pending_waves, 'waves_sent': 1,
+                     'next_wave_at': (now + timedelta(minutes=WAVE_INTERVAL_MIN)).isoformat()})
+        if not pending_waves:
+            item['all_notified_at'] = now.isoformat()
     try:
-        requests_table.put_item(Item={
-            'ID': request_id, 'requester_id': user_id_clean, 'requester_name': user_name,
-            'requester_wa': requester_wa, 'contact_list': contact_list, 'status': 'pendente',
-            'creation_timestamp': datetime.utcnow().isoformat(), 'request_type': request_type,
-            'request_details': user_input, 'ttl': int(time.time()) + 86400
-        })
+        requests_table.put_item(Item=item)
     except Exception as e:
         logger.error(f"Error creating request in DynamoDB: {e}")
         send_text(sender_id, "An internal error occurred while creating your request.")
@@ -327,10 +383,11 @@ def create_and_notify_request(sender_id, user_info, request_type, alert_label, u
         return
 
     requester_label = f"{user_name} ({user_id_clean})"
-    # Envia o alerta (template) para o número real de cada membro da rede.
-    success_count = sum(1 for _, target in network
-                        if send_alert_template(str(target).strip(), requester_label, alert_label, user_input, request_id))
-    logger.info(f"Request {request_id}: alert delivered to Meta for {success_count}/{len(network)} members.")
+    # Envia o alerta (template) para o número real de cada membro da 1ª onda.
+    success_count = sum(1 for r in first_wave
+                        if send_alert_template(str(r['to']).strip(), requester_label, alert_label, user_input, request_id))
+    logger.info(f"Request {request_id}: wave 1/{len(waves)} delivered to Meta for "
+                f"{success_count}/{len(first_wave)} members (network: {len(network)}).")
     send_text(sender_id, MESSAGES[confirmation_message_key] if success_count > 0 else MESSAGES['erro_envio_notificacao'])
     update_user_data(user_id_clean, 'initial')
 
@@ -351,17 +408,26 @@ def handle_acceptance(accepter_id, request_id):
     accepter_name = display_name(accepter_info) if accepter_info else 'Um contato'
 
     try:
+        # Condicional: dois aceites ao mesmo tempo -> só o primeiro vence.
         requests_table.update_item(
             Key={'ID': request_id},
             UpdateExpression='SET #st = :status, accepter_id = :accepter, acceptance_timestamp = :ts, accepter_name = :aname, feedback_pending = :fp',
+            ConditionExpression='#st = :pendente',
             ExpressionAttributeNames={'#st': 'status'},
             ExpressionAttributeValues={
                 ':status': 'aceito', ':accepter': accepter_id_clean,
                 ':ts': datetime.utcnow().isoformat(), ':aname': accepter_name,
-                ':fp': True  # feedback enviado depois pelo monitor (~10-15 min), não junto do aceite
+                ':fp': True,  # feedback enviado depois pelo monitor (~10-15 min), não junto do aceite
+                ':pendente': 'pendente'
             }
         )
-    except Exception as e: 
+    except ClientError as e:
+        if e.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            send_text(accepter_id, MESSAGES['erro_solicitacao_ja_aceita'])
+        else:
+            logger.error(f"Error updating status for request {request_id}: {e}")
+        return
+    except Exception as e:
         logger.error(f"Error updating status for request {request_id}: {e}")
         return
 
@@ -519,6 +585,10 @@ def lambda_handler(event, context):
             state = user_info.get('conversation_state', 'initial')
             logger.info(f"User: {user_id_clean}, State: {state}, Action_ID: {action_id}")
 
+            # A pergunta do CEP nunca bloqueia o menu: um clique de botão segue o fluxo normal.
+            if action_id and state.startswith('awaiting_cep'):
+                state = 'initial'
+
             # --- Button Click Router ---
             if action_id:
                 if 'accept_' in action_id: 
@@ -528,8 +598,7 @@ def lambda_handler(event, context):
                     send_text(sender_id, MESSAGES['confirmacao_recusa_para_recusante'])
                     continue
                 elif action_id == 'open_menu':  # botão do template de boas-vindas
-                    send_main_menu_with_buttons(sender_id)
-                    update_user_data(user_id_clean, 'initial')
+                    send_menu_or_ask_cep(sender_id, user_id_clean, user_info)
                     continue
                 
                 # --- FLUXO AJUDA URGENTE (2 ETAPAS) ---
@@ -600,6 +669,20 @@ def lambda_handler(event, context):
                         update_user_data(user_id_clean, 'awaiting_chat_details')
                         continue
             
+            # --- CEP (perguntado uma vez, ver send_menu_or_ask_cep) ---
+            if state.startswith('awaiting_cep') and not action_id:
+                cep = dispatch.cep_digits(text_input)
+                if cep:
+                    save_user_fields(user_id_clean, cep=cep)
+                    send_text(sender_id, MESSAGES['cep_salvo'])
+                elif state == 'awaiting_cep' and text_input.lower() not in ('pular', 'nao', 'não'):
+                    send_text(sender_id, MESSAGES['cep_invalido'])  # uma 2ª chance; depois segue sem CEP
+                    update_user_data(user_id_clean, 'awaiting_cep_retry')
+                    continue
+                send_main_menu_with_buttons(sender_id)
+                update_user_data(user_id_clean, 'initial')
+                continue
+
             # --- State-based Text Input Flows ---
             if state in ['awaiting_ride_details_medical', 'awaiting_ride_details_pharmacy']:
                 confirmation_key, alert_label, request_type = ('ride_confirm_generic', "🚗 Carona solidária", "ride_other")
@@ -637,8 +720,7 @@ def lambda_handler(event, context):
                     send_text(sender_id, MESSAGES['manual_usabilidade'])
                 
                 logger.info(f"No action_id and no text state match. Sending main menu. State was: {state}")
-                send_main_menu_with_buttons(sender_id)
-                update_user_data(user_id_clean, 'initial')
+                send_menu_or_ask_cep(sender_id, user_id_clean, user_info)
 
         return {'statusCode': 200, 'body': json.dumps('Ok')}
     except Exception as e:
