@@ -40,6 +40,10 @@ if not DYNAMODB_USERS_TABLE_NAME or not DYNAMODB_REQUESTS_TABLE_NAME or not PARA
     logger.error("CRITICAL ERROR: Essential environment variables not configured.")
     raise ValueError("Incomplete environment configuration.")
 
+# A Chave secreta do app é hex (32 caracteres); só dígitos é o App ID, e aí toda mensagem da Meta cai em 401.
+if WA_APP_SECRET and WA_APP_SECRET.isdigit():
+    logger.error("WA_APP_SECRET looks like the App ID, not the App Secret: every Meta webhook will be rejected (401).")
+
 # --- Boto3 Clients and Token ---
 ssm = boto3.client("ssm", region_name=AWS_REGION)
 dynamodb_resource = boto3.resource("dynamodb", region_name=AWS_REGION)
@@ -469,7 +473,7 @@ def lambda_handler(event, context):
         if isinstance(event.get('body'), str):
             raw = _raw_body(event)
             if not valid_signature(event, raw):
-                logger.warning("Invalid X-Hub-Signature-256; request rejected.")
+                logger.error("Invalid X-Hub-Signature-256; request rejected. Check WA_APP_SECRET (App Secret, not the App ID).")
                 return _plain(401, 'Invalid signature')
             body = json.loads(raw or '{}')
         else:
