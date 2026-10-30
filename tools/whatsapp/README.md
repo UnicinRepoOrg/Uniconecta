@@ -34,7 +34,7 @@ python3 tools/whatsapp/create_templates.py --status
 | `MIN_ONDA` | ✓ | | | opcional: `10` (mínimo de pessoas por onda) |
 
 - O papel IAM da **UniconectaApp** precisa de `ssm:GetParameter` (e `kms:Decrypt`, se a chave KMS for própria) nesse parâmetro. Se o envio falhar, a aprovação continua funcionando: só fica um log.
-- Timeout do BOT ≥ 30s (o alerta é enviado em sequência para toda a rede).
+- Timeout do BOT ≥ 30s. O alerta sai para a rede com até `SEND_CONCURRENCY` envios ao mesmo tempo (padrão `10`, nas duas Lambdas): 400 pessoas levam cerca de 15 s, contra mais de 2 minutos em sequência. A Meta aceita 80 mensagens/s por número; não passe de 40.
 - Token: use um **System User token permanente** (Business Settings → Usuários do sistema) com `whatsapp_business_messaging` e `whatsapp_business_management`. Nunca no git.
 
 ## Supervisores

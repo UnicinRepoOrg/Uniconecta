@@ -11,6 +11,7 @@ import urllib.request
 import time
 import random
 import string
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
@@ -44,6 +45,8 @@ WA_TEMPLATE_LANG = os.environ.get('WA_TEMPLATE_LANG', 'pt_BR')
 DISPATCH_MODE = os.environ.get('DISPATCH_MODE', 'broadcast').strip().lower()
 WAVE_INTERVAL_MIN = int(os.environ.get('WAVE_INTERVAL_MIN', '15'))
 MIN_ONDA = int(os.environ.get('MIN_ONDA', '10'))
+# Envios simultâneos à Graph API ao avisar a rede (ver send_many).
+SEND_CONCURRENCY = int(os.environ.get('SEND_CONCURRENCY', '10'))
 
 # --- Initial Validations ---
 if (not DYNAMODB_USERS_TABLE_NAME or not DYNAMODB_REQUESTS_TABLE_NAME or not PARAM_NAME_TOKEN
@@ -213,6 +216,16 @@ def send_alert_template(to, requester_label, alert_label, details, request_id):
     return send_template(to, WA_TEMPLATE_ALERT,
                          [requester_label, alert_label, details, request_id],
                          [f"accept_{request_id}", f"decline_{request_id}"])
+
+def send_many(send, targets):
+    """Chama send(target) para cada destino, até SEND_CONCURRENCY ao mesmo tempo, e devolve
+    quantos a Meta aceitou. Cada chamada à Graph API leva centenas de ms; em sequência, uma
+    rede de 400 pessoas passava de 2 minutos. A Meta aceita 80 mensagens/s por número."""
+    targets = list(targets)
+    if len(targets) <= 1:
+        return sum(1 for t in targets if send(t))
+    with ThreadPoolExecutor(max_workers=min(SEND_CONCURRENCY, len(targets))) as pool:
+        return sum(1 for ok in pool.map(send, targets) if ok)
 
 def send_emergency_type_buttons(to):
     # Títulos com no máximo 20 caracteres (limite do WhatsApp)
@@ -399,8 +412,9 @@ def create_and_notify_request(sender_id, user_info, request_type, alert_label, u
 
     requester_label = f"{user_name} ({user_id_clean})"
     # Envia o alerta (template) para o número real de cada membro da 1ª onda.
-    success_count = sum(1 for r in first_wave
-                        if send_alert_template(str(r['to']).strip(), requester_label, alert_label, user_input, request_id))
+    success_count = send_many(
+        lambda r: send_alert_template(str(r['to']).strip(), requester_label, alert_label, user_input, request_id),
+        first_wave)
     logger.info(f"Request {request_id}: wave 1/{len(waves)} delivered to Meta for "
                 f"{success_count}/{len(first_wave)} members (network: {len(network)}).")
     send_text(sender_id, MESSAGES[confirmation_message_key] if success_count > 0 else MESSAGES['erro_envio_notificacao'])
@@ -463,10 +477,10 @@ def handle_acceptance(accepter_id, request_id):
     send_text(accepter_id, MESSAGES['confirmacao_aceite_para_aceitante'].format(requester_name=request_item['requester_name'], requester_link=requester_link))
 
     # Notifica os outros contatos (no JID real de cada um)
-    for contact_num in request_item.get('contact_list', []):
-        cid = str(contact_num).strip()
-        if cid not in [accepter_id_clean, requester_id]:
-            send_text(send_target(cid), MESSAGES['notificacao_outros_contatos'].format(requester_name=request_item['requester_name']))
+    others = [cid for cid in (str(c).strip() for c in request_item.get('contact_list', []))
+              if cid not in [accepter_id_clean, requester_id]]
+    notice = MESSAGES['notificacao_outros_contatos'].format(requester_name=request_item['requester_name'])
+    send_many(lambda cid: send_text(send_target(cid), notice), others)
 
 # --- Main Lambda Handler ---
 

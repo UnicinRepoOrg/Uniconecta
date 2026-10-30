@@ -5,6 +5,7 @@ import re
 import json
 import logging
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from botocore.exceptions import ClientError
 
@@ -26,6 +27,8 @@ WA_TEMPLATE_LANG = os.environ.get('WA_TEMPLATE_LANG', 'pt_BR')
 # Intervalo entre as ondas do envio por proximidade (o BOT grava next_wave_at com o mesmo valor).
 # O agendamento deste monitor precisa rodar a cada 5 min ou menos para respeitar o intervalo.
 WAVE_INTERVAL_MIN = int(os.environ.get('WAVE_INTERVAL_MIN', '15'))
+# Envios simultâneos à Graph API ao avisar uma onda ou os supervisores (ver send_many).
+SEND_CONCURRENCY = int(os.environ.get('SEND_CONCURRENCY', '10'))
 
 
 # --- Mensagens ---
@@ -117,6 +120,16 @@ def send_alert_template(to, requester_label, alert_label, details, request_id):
                          [requester_label, alert_label, details, request_id],
                          [f"accept_{request_id}", f"decline_{request_id}"])
 
+def send_many(send, targets):
+    """Chama send(target) para cada destino, até SEND_CONCURRENCY ao mesmo tempo, e devolve
+    quantos a Meta aceitou. Cada chamada à Graph API leva centenas de ms; em sequência, uma
+    rede de 400 pessoas passava de 2 minutos. A Meta aceita 80 mensagens/s por número."""
+    targets = list(targets)
+    if len(targets) <= 1:
+        return sum(1 for t in targets if send(t))
+    with ThreadPoolExecutor(max_workers=min(SEND_CONCURRENCY, len(targets))) as pool:
+        return sum(1 for ok in pool.map(send, targets) if ok)
+
 # --- FUNÇÃO send_nps_survey REMOVIDA ---
 
 
@@ -146,8 +159,7 @@ def escalate_to_supervisors(request_id, message):
     supervisors = get_supervisor_targets()
     if not supervisors:
         logger.error("No supervisor in the users table (is_supervisor = true, status = approved): overdue request not escalated to anyone.")
-    for supervisor_num in supervisors:
-        send_text(supervisor_num, message)
+    send_many(lambda supervisor_num: send_text(supervisor_num, message), supervisors)
     requests_table.update_item(Key={'ID': request_id}, UpdateExpression='SET escalated = :val', ExpressionAttributeValues={':val': True})
 
 
@@ -208,9 +220,10 @@ def send_next_wave(item, now):
 
     requester_label = f"{item.get('requester_name', 'N/A')} ({item.get('requester_id', '')})"
     alert_label = item.get('alert_label') or item.get('request_type', '')
-    success_count = sum(1 for r in wave
-                        if send_alert_template(str(r['to']).strip(), requester_label, alert_label,
-                                               item.get('request_details', ''), request_id))
+    success_count = send_many(
+        lambda r: send_alert_template(str(r['to']).strip(), requester_label, alert_label,
+                                      item.get('request_details', ''), request_id),
+        wave)
     logger.info(f"Request {request_id}: wave {sent + 1} delivered to Meta for {success_count}/{len(wave)} members"
                 f"{' (whole network notified)' if not remaining else ''}.")
 
