@@ -34,6 +34,9 @@ python3 tools/whatsapp/create_templates.py --status
 - Timeout do BOT ≥ 30s (o alerta é enviado em sequência para toda a rede).
 - Token: use um **System User token permanente** (Business Settings → Usuários do sistema) com `whatsapp_business_messaging` e `whatsapp_business_management`. Nunca no git.
 
+## Supervisores
+O alerta de solicitação pendente há mais de 1h (`lambda_check`) vai para os usuários do `DBBot` com **`is_supervisor` = `true`** (Boolean) e `status` = `approved`. Para incluir ou tirar alguém, edite o item no console do DynamoDB. Nenhum número fica no código.
+
 ## Checklist de virada (cutover)
 1. Atualizar o valor do parâmetro SSM com o token da Meta e criar as variáveis acima.
 2. Deploy das 3 Lambdas (CloudMan pull Git → AWS).

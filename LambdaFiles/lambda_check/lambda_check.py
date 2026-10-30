@@ -21,8 +21,6 @@ PARAM_NAME_TOKEN = os.environ.get('AWS_SSM_PARAMETER_NAME_0') or os.getenv("AWS_
 GRAPH_API_URL = os.environ.get('GRAPH_API_URL', 'https://graph.facebook.com/v26.0').rstrip('/')
 WA_PHONE_NUMBER_ID = os.environ.get('WA_PHONE_NUMBER_ID')
 
-# --- Hardcoded Supervisor List ---
-SUPERVISOR_NUMBERS = ['553186155781']
 
 # --- Mensagens ---
 # Enviada ~10-15 min após o aceite (não junto do atendimento). Mantida idêntica ao
@@ -97,6 +95,26 @@ def send_main_menu_with_buttons(to):
 
 # --- Lógica Principal do Monitor ---
 
+def get_supervisor_targets():
+    """Supervisores vêm da tabela de usuários: is_supervisor = true e cadastro aprovado.
+    Devolve o wa_jid (número real de onde a pessoa fala) ou o ID."""
+    targets, kwargs = [], {
+        'FilterExpression': 'is_supervisor = :t AND #st = :approved',
+        'ExpressionAttributeNames': {'#st': 'status'},
+        'ExpressionAttributeValues': {':t': True, ':approved': 'approved'},
+    }
+    try:
+        while True:
+            response = users_table.scan(**kwargs)
+            targets += [it.get('wa_jid') or it['ID'] for it in response.get('Items', [])]
+            if 'LastEvaluatedKey' not in response:
+                break
+            kwargs['ExclusiveStartKey'] = response['LastEvaluatedKey']
+    except Exception as e:
+        logger.error(f"Error querying supervisors: {e}")
+    return targets
+
+
 def handle_pending_requests(now, start_time_iso):
     """(1) Notificar supervisores sobre solicitações pendentes há mais de 1 hora (criadas nas últimas 2h)."""
     logger.info("Checking for overdue pending requests...")
@@ -123,8 +141,11 @@ def handle_pending_requests(now, start_time_iso):
             requester_name = item.get('requester_name', 'N/A')
             message = f"ALERTA SUPERVISOR: A solicitação de ajuda de *{requester_name}* (ID: {item['ID']}) está pendente há mais de 1 hora e não foi atendida."
             
-            for supervisor_num in SUPERVISOR_NUMBERS:
-                send_text(f"{supervisor_num}@s.whatsapp.net", message)
+            supervisors = get_supervisor_targets()
+            if not supervisors:
+                logger.error("No supervisor in the users table (is_supervisor = true, status = approved): overdue request not escalated to anyone.")
+            for supervisor_num in supervisors:
+                send_text(supervisor_num, message)
             
             requests_table.update_item(Key={'ID': item['ID']}, UpdateExpression='SET escalated = :val', ExpressionAttributeValues={':val': True})
 

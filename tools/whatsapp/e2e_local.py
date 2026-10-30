@@ -35,6 +35,7 @@ TEST_TO = re.sub(r'\D', '', ENV.get('TEST_TO', '')) or '5531900000099'
 TEST_TO_2 = re.sub(r'\D', '', ENV.get('TEST_TO_2', ''))
 ALLOWED_LIVE = {n for n in (TEST_TO, TEST_TO_2) if n} if LIVE else set()
 FAKE_REQUESTER = TEST_TO_2 or '5531900000001'   # quem pede ajuda (suprimido se não for número de teste)
+SUPERVISOR = '5531900000077'                    # fictício: usuário com is_supervisor no DBBot
 APP_SECRET = 'e2e-app-secret'
 VERIFY_TOKEN = 'e2e-verify-token'
 
@@ -422,6 +423,7 @@ def main():
     REQS[req['ID']]['acceptance_timestamp'] = (datetime.utcnow() - timedelta(minutes=15)).isoformat()
     USERS[TEST_TO].update(conversation_state='awaiting_ride_type',
                           state_last_updated=(datetime.utcnow() - timedelta(minutes=90)).isoformat())
+    USERS[SUPERVISOR] = {'ID': SUPERVISOR, 'status': 'approved', 'is_supervisor': True, 'nome_completo': 'Supervisor E2E'}
     REQS['OLD-001'] = {'ID': 'OLD-001', 'status': 'pendente', 'requester_name': 'Antigo',
                        'creation_timestamp': (datetime.utcnow() - timedelta(minutes=70)).isoformat()}
     mark = len(SENT)
@@ -432,7 +434,7 @@ def main():
        any(r['to'] == FAKE_REQUESTER for r in recs) and REQS[req['ID']]['feedback_pending'] is False, show(recs))
     ok('stale conversation -> menu re-sent + reset',
        any(r['to'] == TEST_TO and r['type'] == 'interactive' for r in recs) and USERS[TEST_TO]['conversation_state'] == 'initial')
-    ok('overdue request escalated to supervisor', REQS['OLD-001'].get('escalated') is True and any(r['to'] == '553186155781' for r in recs))
+    ok('overdue request escalated to supervisor', REQS['OLD-001'].get('escalated') is True and any(r['to'] == SUPERVISOR for r in recs))
     ok('monitor messages accepted by Meta', live_ok(recs))
 
     failed = [r for r in RESULTS if not r[1]]

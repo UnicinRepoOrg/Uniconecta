@@ -120,7 +120,7 @@ INTERNAL_FIELDS = {'ID', 'conversation_state', 'state_last_updated', 'lista_cont
 # =====================================================================
 
 def canonical_phone(raw):
-    """'(31) 98615-5781' -> '5531986155781' (só dígitos, DDI 55)."""
+    """'(31) 99000-0000' -> '5531990000000' (só dígitos, DDI 55)."""
     if not raw:
         return None
     digits = re.sub(r'\D', '', str(raw)).lstrip('0')
