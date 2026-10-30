@@ -207,7 +207,7 @@ def send_ride_type_buttons(to):
 
 def phone_variants(num):
     """Gera variantes BR com/sem o 9 após o DDD (o WhatsApp costuma entregar
-    o JID sem o 9). Ex.: '553186155781' <-> '5531986155781'."""
+    o JID sem o 9). Ex.: '553190000000' <-> '5531990000000'."""
     digits = re.sub(r'\D', '', str(num or ''))
     variants = [digits]
     if digits.startswith('55') and len(digits) >= 12:
