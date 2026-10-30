@@ -37,6 +37,7 @@ ALLOWED_LIVE = {n for n in (TEST_TO, TEST_TO_2) if n} if LIVE else set()
 FAKE_REQUESTER = TEST_TO_2 or '5531900000001'   # quem pede ajuda (suprimido se não for número de teste)
 SUPERVISOR = '5531900000077'                    # fictício: usuário com is_supervisor no DBBot
 APP_SECRET = 'e2e-app-secret'
+APP_SECRET_PARAM = '/uniconecta/whatsapp-app-secret'   # parâmetro SSM do segredo do app (só o BOT o lê)
 VERIFY_TOKEN = 'e2e-verify-token'
 
 # =====================================================================
@@ -146,6 +147,8 @@ class FakeResource:
 
 class FakeSSM:
     def get_parameter(self, Name, WithDecryption=False):
+        if Name == APP_SECRET_PARAM:
+            return {'Parameter': {'Value': APP_SECRET}}
         return {'Parameter': {'Value': TOKEN}}
 
 
@@ -229,9 +232,10 @@ urllib.request.urlopen = _fake_urlopen
 COMMON_ENV = {
     'AWS_DYNAMODB_TABLE_NAME_0': 'users', 'AWS_DYNAMODB_TABLE_NAME_1': 'requests',
     'AWS_SSM_PARAMETER_NAME_0': '/uniconecta/wa-token',
+    'AWS_SSM_PARAMETER_NAME_APP_SECRET': APP_SECRET_PARAM,   # ligação BOT -> whatsapp-app-secret, label "app_secret"
     'GRAPH_API_URL': ENV.get('GRAPH_API_URL', 'https://graph.facebook.com/v26.0'),
     'WA_PHONE_NUMBER_ID': ENV.get('WA_PHONE_NUMBER_ID', '1413979345131573'),
-    'WA_VERIFY_TOKEN': VERIFY_TOKEN, 'WA_APP_SECRET': APP_SECRET,
+    'WA_VERIFY_TOKEN': VERIFY_TOKEN,
 }
 ADMIN_EMAIL, ADMIN_PASSWORD = 'e2e@uniconecta.test', base64.urlsafe_b64encode(os.urandom(12)).decode()
 _salt = os.urandom(16)
@@ -375,6 +379,17 @@ def main():
     mark = len(SENT)
     resp = webhook(TEST_TO, text='oi', sign=False)
     ok('POST with bad signature -> 401, nothing sent', resp['statusCode'] == 401 and not sent_since(mark))
+    raw = json.dumps({'object': 'whatsapp_business_account', 'entry': []})
+    for label, headers in (('no signature header', {}),
+                           ('empty signature', {'X-Hub-Signature-256': ''}),
+                           ('non-ASCII signature', {'X-Hub-Signature-256': 'sha256=é'})):
+        resp = bot.lambda_handler({'httpMethod': 'POST', 'headers': headers, 'body': raw}, None)
+        ok(f'POST with {label} -> 401', resp['statusCode'] == 401)
+    resp = bot.lambda_handler({'httpMethod': 'POST', 'headers': {}, 'body': None}, None)
+    ok('POST with no body and no signature -> 401', resp['statusCode'] == 401)
+    resp = bot.lambda_handler({'httpMethod': 'POST', 'headers': {'x-hub-signature-256': 'sha256=' + hmac.new(
+        APP_SECRET.encode(), raw.encode(), hashlib.sha256).hexdigest()}, 'body': raw}, None)
+    ok('POST signed with the SSM secret (lowercase header) -> 200', resp['statusCode'] == 200)
 
     print("\n3) Volunteer opens the bot")
     mark = len(SENT)

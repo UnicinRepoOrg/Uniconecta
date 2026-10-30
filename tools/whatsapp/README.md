@@ -27,7 +27,7 @@ python3 tools/whatsapp/create_templates.py --status
 | `WA_PHONE_NUMBER_ID` | ✓ | ✓ | ✓ | `1413979345131573` |
 | `AWS_SSM_PARAMETER_NAME_0` | ✓ | ✓ | ✓ **novo** | mesmo parâmetro SSM; **valor (SecureString) = access token da Meta** |
 | `WA_VERIFY_TOKEN` | ✓ | | | string aleatória; a mesma no painel de webhook da Meta |
-| `WA_APP_SECRET` | ✓ | | | App → Configurações → Básico → Chave secreta (valida `X-Hub-Signature-256`) |
+| `AWS_SSM_PARAMETER_NAME_APP_SECRET` | ✓ **obrigatória** | | | nome do parâmetro SSM `whatsapp-app-secret`, escrito pela ligação do BOT com label `app_secret`; **valor (SecureString) = App → Configurações → Básico → Chave secreta**. O BOT só sobe com ela e recusa com 401 toda requisição sem `X-Hub-Signature-256` válido |
 | `WA_TEMPLATE_ALERT` / `WA_TEMPLATE_WELCOME` / `WA_TEMPLATE_LANG` | ✓ | ✓ | ✓ | opcionais: `alerta_rede_apoio` / `boas_vindas_aprovado` / `pt_BR` |
 | `DISPATCH_MODE` | ✓ | | | `broadcast` (padrão: rede toda de uma vez) ou `waves` (ondas por CEP) |
 | `WAVE_INTERVAL_MIN` | ✓ | ✓ | | opcional: `15` (minutos entre ondas e até o supervisor); mesmo valor nas duas |
