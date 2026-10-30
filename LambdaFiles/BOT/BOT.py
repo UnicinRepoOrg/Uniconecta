@@ -26,13 +26,15 @@ DYNAMODB_USERS_TABLE_NAME = os.environ.get('AWS_DYNAMODB_TABLE_NAME_0') or os.en
 DYNAMODB_REQUESTS_TABLE_NAME = os.environ.get('AWS_DYNAMODB_TABLE_NAME_1') or os.environ.get('AWS_DYNAMODB_TABLE_TARGET_NAME_1')
 AWS_REGION = os.environ.get('REGION', 'us-east-1')
 PARAM_NAME_TOKEN = os.environ.get('AWS_SSM_PARAMETER_NAME_0') or os.getenv("AWS_SSM_PARAMETER_TARGET_NAME_0")
+# Parâmetro com a Chave secreta do app da Meta (valida X-Hub-Signature-256). Obrigatório; o valor
+# nunca passa por variável de ambiente, só o nome do parâmetro (a ligação com label "app_secret" no canvas).
+PARAM_NAME_APP_SECRET = os.environ.get('AWS_SSM_PARAMETER_NAME_APP_SECRET')
 STATUS_INDEX = os.environ.get('STATUS_INDEX_NAME', 'StatusIndex')
 
 # --- WhatsApp Business Cloud API (Meta) ---
 GRAPH_API_URL = os.environ.get('GRAPH_API_URL', 'https://graph.facebook.com/v26.0').rstrip('/')
 WA_PHONE_NUMBER_ID = os.environ.get('WA_PHONE_NUMBER_ID')
 WA_VERIFY_TOKEN = os.environ.get('WA_VERIFY_TOKEN')        # verificação do webhook (GET hub.challenge)
-WA_APP_SECRET = os.environ.get('WA_APP_SECRET')            # opcional: valida X-Hub-Signature-256
 WA_TEMPLATE_ALERT = os.environ.get('WA_TEMPLATE_ALERT', 'alerta_rede_apoio')
 WA_TEMPLATE_LANG = os.environ.get('WA_TEMPLATE_LANG', 'pt_BR')
 
@@ -44,13 +46,11 @@ WAVE_INTERVAL_MIN = int(os.environ.get('WAVE_INTERVAL_MIN', '15'))
 MIN_ONDA = int(os.environ.get('MIN_ONDA', '10'))
 
 # --- Initial Validations ---
-if not DYNAMODB_USERS_TABLE_NAME or not DYNAMODB_REQUESTS_TABLE_NAME or not PARAM_NAME_TOKEN or not WA_PHONE_NUMBER_ID:
-    logger.error("CRITICAL ERROR: Essential environment variables not configured.")
+if (not DYNAMODB_USERS_TABLE_NAME or not DYNAMODB_REQUESTS_TABLE_NAME or not PARAM_NAME_TOKEN
+        or not PARAM_NAME_APP_SECRET or not WA_PHONE_NUMBER_ID):
+    logger.error("CRITICAL ERROR: Essential environment variables not configured "
+                 "(the SSM parameter names AWS_SSM_PARAMETER_NAME_0 = token and AWS_SSM_PARAMETER_NAME_APP_SECRET = app secret are both required).")
     raise ValueError("Incomplete environment configuration.")
-
-# A Chave secreta do app é hex (32 caracteres); só dígitos é o App ID, e aí toda mensagem da Meta cai em 401.
-if WA_APP_SECRET and WA_APP_SECRET.isdigit():
-    logger.error("WA_APP_SECRET looks like the App ID, not the App Secret: every Meta webhook will be rejected (401).")
 
 # --- Boto3 Clients and Token ---
 ssm = boto3.client("ssm", region_name=AWS_REGION)
@@ -66,6 +66,21 @@ try:
 except Exception as e:
     logger.error(f"CRITICAL ERROR loading token from SSM: {e}")
     raise e
+
+# --- Load the Meta app secret from SSM Parameter Store ---
+# Sem o segredo a função não sobe: nunca atende o webhook sem poder validar a assinatura.
+try:
+    APP_SECRET = ssm.get_parameter(Name=PARAM_NAME_APP_SECRET, WithDecryption=True)["Parameter"]["Value"].strip()
+    if not APP_SECRET:
+        raise ValueError("the app secret parameter is empty")
+    logger.info("App secret loaded successfully from SSM Parameter Store.")
+except Exception as e:
+    logger.error(f"CRITICAL ERROR loading the app secret from SSM: {e}")
+    raise e
+
+# A Chave secreta do app é hex (32 caracteres); só dígitos é o App ID, e aí toda mensagem da Meta cai em 401.
+if APP_SECRET.isdigit():
+    logger.error("The app secret parameter looks like the App ID, not the App Secret: every Meta webhook will be rejected (401).")
 
 # --- Centralized Messages ---
 MESSAGES = {
@@ -481,13 +496,12 @@ def handle_verification(event):
 
 
 def valid_signature(event, raw):
-    """X-Hub-Signature-256 = HMAC-SHA256(app secret, corpo bruto). Ignorado se WA_APP_SECRET não estiver definido."""
-    if not WA_APP_SECRET:
-        return True
+    """X-Hub-Signature-256 = HMAC-SHA256(app secret, corpo bruto). Sempre exigida: sem cabeçalho, ou com valor errado, é falso."""
     headers = {k.lower(): v for k, v in (event.get('headers') or {}).items()}
-    received = headers.get('x-hub-signature-256', '')
-    expected = 'sha256=' + hmac.new(WA_APP_SECRET.encode(), raw.encode('utf-8'), hashlib.sha256).hexdigest()
-    return hmac.compare_digest(received, expected)
+    received = headers.get('x-hub-signature-256') or ''
+    expected = 'sha256=' + hmac.new(APP_SECRET.encode(), raw.encode('utf-8'), hashlib.sha256).hexdigest()
+    # bytes: compare_digest recusa str com caractere fora do ASCII (um cabeçalho forjado viraria erro 500).
+    return hmac.compare_digest(str(received).encode('utf-8'), expected.encode('utf-8'))
 
 
 def iter_incoming(body):
@@ -536,10 +550,12 @@ def lambda_handler(event, context):
         if _http_method(event) == 'GET':
             return handle_verification(event)
 
-        if isinstance(event.get('body'), str):
+        # Toda chamada HTTP (API Gateway) precisa de assinatura válida, inclusive a de corpo vazio.
+        # Só a invocação direta pela API do Lambda (que exige permissão IAM) entra sem ela.
+        if 'httpMethod' in event or 'requestContext' in event or isinstance(event.get('body'), str):
             raw = _raw_body(event)
             if not valid_signature(event, raw):
-                logger.error("Invalid X-Hub-Signature-256; request rejected. Check WA_APP_SECRET (App Secret, not the App ID).")
+                logger.error("Invalid X-Hub-Signature-256; request rejected. Check the app secret parameter (App Secret, not the App ID).")
                 return _plain(401, 'Invalid signature')
             body = json.loads(raw or '{}')
         else:
