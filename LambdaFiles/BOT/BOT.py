@@ -47,6 +47,10 @@ WAVE_INTERVAL_MIN = int(os.environ.get('WAVE_INTERVAL_MIN', '15'))
 MIN_ONDA = int(os.environ.get('MIN_ONDA', '10'))
 # Envios simultâneos à Graph API ao avisar a rede (ver send_many).
 SEND_CONCURRENCY = int(os.environ.get('SEND_CONCURRENCY', '10'))
+# Prazo gravado no campo ttl de cada pedido: o TTL da SolicitacoesAtivas o apaga depois disso.
+# O lambda_check copia os pedidos para o S3 a partir das 3h do dia seguinte e tenta de novo a
+# cada execução; 3 dias deixam cerca de 45 tentativas antes do primeiro pedido do dia expirar.
+REQUEST_TTL_DAYS = int(os.environ.get('REQUEST_TTL_DAYS', '3'))
 
 # --- Initial Validations ---
 if (not DYNAMODB_USERS_TABLE_NAME or not DYNAMODB_REQUESTS_TABLE_NAME or not PARAM_NAME_TOKEN
@@ -393,7 +397,7 @@ def create_and_notify_request(sender_id, user_info, request_type, alert_label, u
         'ID': request_id, 'requester_id': user_id_clean, 'requester_name': user_name,
         'requester_wa': requester_wa, 'contact_list': contact_list, 'status': 'pendente',
         'creation_timestamp': now.isoformat(), 'request_type': request_type,
-        'request_details': user_input, 'ttl': int(time.time()) + 86400
+        'request_details': user_input, 'ttl': int(time.time()) + REQUEST_TTL_DAYS * 86400
     }
     if use_waves:
         # O lambda_check lê estes campos: envia a próxima onda em next_wave_at e, com a

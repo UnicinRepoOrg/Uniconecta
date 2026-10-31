@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import json
+import gzip
 import hmac
 import time
 import types
@@ -22,6 +23,7 @@ import hashlib
 import importlib.util
 import urllib.request
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -135,9 +137,23 @@ class FakeTable:
         attr, value = KeyConditionExpression
         return {'Items': [dict(i) for i in self.rows.values() if i.get(attr) == value]}
 
-    def scan(self, FilterExpression=None, ExpressionAttributeNames=None, ExpressionAttributeValues=None, **_):
+    def scan(self, FilterExpression=None, ExpressionAttributeNames=None, ExpressionAttributeValues=None,
+             ExclusiveStartKey=None, **_):
+        """Como o DynamoDB: a página corta os itens LIDOS (antes do filtro), em SCAN_PAGE['size'] por vez."""
         names, values = ExpressionAttributeNames or {}, ExpressionAttributeValues or {}
-        return {'Items': [dict(i) for i in self.rows.values() if _eval(FilterExpression, i, names, values)]}
+        rows = list(self.rows.values())
+        if ExclusiveStartKey:
+            ids = [r['ID'] for r in rows]
+            rows = rows[ids.index(ExclusiveStartKey['ID']) + 1:]
+        size = SCAN_PAGE['size'] or len(rows)
+        page, rest = rows[:size], rows[size:]
+        resp = {'Items': [dict(i) for i in page if _eval(FilterExpression, i, names, values)]}
+        if rest:
+            resp['LastEvaluatedKey'] = {'ID': page[-1]['ID']}
+        return resp
+
+
+SCAN_PAGE = {'size': None}  # None = uma página só; o cenário de paginação usa 1
 
 
 class FakeResource:
@@ -152,9 +168,29 @@ class FakeSSM:
         return {'Parameter': {'Value': TOKEN}}
 
 
+class FakeS3:
+    """Bucket do arquivo diário: {key: bytes}. fail_puts > 0 faz as próximas gravações falharem."""
+    def __init__(self):
+        self.objects, self.puts, self.fail_puts = {}, 0, 0
+
+    def head_object(self, Bucket, Key):
+        if Key not in self.objects:
+            raise ClientError('404')
+        return {}
+
+    def put_object(self, Bucket, Key, Body, **_):
+        if self.fail_puts:
+            self.fail_puts -= 1
+            raise ClientError('ServiceUnavailable')
+        self.objects[Key] = Body
+        self.puts += 1
+        return {}
+
+
+S3 = FakeS3()
 boto3 = types.ModuleType('boto3')
 boto3.resource = lambda *a, **k: FakeResource()
-boto3.client = lambda *a, **k: FakeSSM()
+boto3.client = lambda service, *a, **k: S3 if service == 's3' else FakeSSM()
 boto3_dynamodb = types.ModuleType('boto3.dynamodb')
 boto3_conditions = types.ModuleType('boto3.dynamodb.conditions')
 boto3_conditions.Key = _KeyCond
@@ -233,6 +269,7 @@ COMMON_ENV = {
     'AWS_DYNAMODB_TABLE_NAME_0': 'users', 'AWS_DYNAMODB_TABLE_NAME_1': 'requests',
     'AWS_SSM_PARAMETER_NAME_0': '/uniconecta/wa-token',
     'AWS_SSM_PARAMETER_NAME_APP_SECRET': APP_SECRET_PARAM,   # ligação BOT -> whatsapp-app-secret, label "app_secret"
+    'AWS_S3_BUCKET_NAME_0': 'e2e-archive',                   # ligação lambda_check -> bucket do arquivo diário
     'GRAPH_API_URL': ENV.get('GRAPH_API_URL', 'https://graph.facebook.com/v26.0'),
     'WA_PHONE_NUMBER_ID': ENV.get('WA_PHONE_NUMBER_ID', '1413979345131573'),
     'WA_VERIFY_TOKEN': VERIFY_TOKEN,
@@ -424,6 +461,7 @@ def main():
     recs = sent_since(mark)
     req = next(iter(REQS.values()), None)
     ok('request created (pendente)', req and req['status'] == 'pendente', json.dumps(req, default=str) if req else '')
+    ok('request ttl = creation + 3 days', req and abs(req['ttl'] - (time.time() + 3 * 86400)) < 60, str(req and req.get('ttl')))
     alert = next((r for r in recs if r['template'] == 'alerta_rede_apoio' and r['to'] == TEST_TO), None)
     ok('alert template sent to network member', alert, show(recs))
     if alert:
@@ -467,6 +505,8 @@ def main():
     ok('monitor messages accepted by Meta', live_ok(recs))
 
     waves_scenario()
+    paging_scenario()
+    archive_scenario()
 
     failed = [r for r in RESULTS if not r[1]]
     print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} checks passed. "
@@ -601,6 +641,102 @@ def waves_scenario():
     ok('urgent -> whole network at once', alerted(recs) == wave1 | wave2 | wave3, str(len(alerted(recs))))
     ok('urgent -> no pending waves, supervisor clock started', req['waves'] == [] and req.get('all_notified_at'))
     bot.DISPATCH_MODE = 'broadcast'
+
+
+def paging_scenario():
+    """Os Scans do lambda_check seguem todas as páginas: o DynamoDB devolve no máximo 1 MB por chamada."""
+    print("\n10) Monitor reads every page of its Scans")
+    REQS.clear()
+    created = (datetime.utcnow() - timedelta(minutes=70)).isoformat()
+    for i in range(3):
+        REQS[f'PG-{i}'] = {'ID': f'PG-{i}', 'status': 'pendente', 'requester_name': f'P{i}', 'creation_timestamp': created}
+    accepted = (datetime.utcnow() - timedelta(minutes=15)).isoformat()
+    for i in range(2):
+        REQS[f'FB-{i}'] = {'ID': f'FB-{i}', 'status': 'aceito', 'feedback_pending': True,
+                           'acceptance_timestamp': accepted, 'requester_wa': f'553190000020{i}'}
+    stale_at = (datetime.utcnow() - timedelta(minutes=90)).isoformat()
+    stale = ('5531900000301', '5531900000302')
+    for uid in stale:
+        USERS[uid] = {'ID': uid, 'status': 'approved', 'conversation_state': 'awaiting_ride_type', 'state_last_updated': stale_at}
+    SCAN_PAGE['size'] = 1
+    try:
+        check.lambda_handler({}, None)
+    finally:
+        SCAN_PAGE['size'] = None
+    ok('overdue requests on every page escalated', all(REQS[f'PG-{i}'].get('escalated') for i in range(3)))
+    ok('feedback on every page sent', all(REQS[f'FB-{i}']['feedback_pending'] is False for i in range(2)))
+    ok('stale conversations on every page reset', all(USERS[u]['conversation_state'] == 'initial' for u in stale))
+
+
+def _brt(y, m, d, hh, mm=0):
+    """Um instante no horário de Brasília -> (datetime UTC, ISO em UTC sem fuso, como o BOT grava)."""
+    t = datetime(y, m, d, hh, mm, tzinfo=check.LOCAL_TZ).astimezone(check.timezone.utc)
+    return t, t.replace(tzinfo=None).isoformat()
+
+
+def archive_scenario():
+    print("\n11) Daily archive of the requests to S3")
+    REQS.clear()
+    S3.objects.clear()
+    key = lambda day: f"pedidos/dt={day}/pedidos.json.gz"
+    def read(day):
+        return [json.loads(line) for line in gzip.decompress(S3.objects[key(day)]).decode('utf-8').splitlines()]
+
+    d28, d29 = _brt(2026, 10, 28, 10)[1], _brt(2026, 10, 29, 9)[1]
+    late = _brt(2026, 10, 30, 23, 30)[1]   # 02:30 UTC de 31/10, mas ainda dia 30 em Brasília
+    today = _brt(2026, 10, 31, 1)[1]
+    REQS['A-1'] = {'ID': 'A-1', 'status': 'aceito', 'creation_timestamp': d28, 'ttl': Decimal('1793500000'),
+                   'waves_sent': Decimal('2'), 'contact_list': ['5531900000101']}
+    REQS['A-2'] = {'ID': 'A-2', 'status': 'pendente', 'creation_timestamp': d29}
+    REQS['A-3'] = {'ID': 'A-3', 'status': 'pendente', 'creation_timestamp': late, 'tags': {'y', 'x'}}
+    REQS['A-4'] = {'ID': 'A-4', 'status': 'pendente', 'creation_timestamp': today}
+    REQS['A-5'] = {'ID': 'A-5', 'status': 'pendente'}  # sem creation_timestamp
+
+    check.handle_daily_archive(_brt(2026, 10, 31, 2, 59)[0])
+    ok('before 03:00 Brasília -> nothing written', not S3.objects)
+
+    S3.fail_puts = 1
+    try:
+        check.handle_daily_archive(_brt(2026, 10, 31, 3, 5)[0])
+        raised = False
+    except ClientError:
+        raised = True
+    ok('S3 failure -> error raised, nothing written', raised and not S3.objects)
+
+    SCAN_PAGE['size'] = 2
+    try:
+        check.handle_daily_archive(_brt(2026, 10, 31, 4)[0])
+    finally:
+        SCAN_PAGE['size'] = None
+    ok('next run writes every past day still in the table',
+       set(S3.objects) == {key('2026-10-28'), key('2026-10-29'), key('2026-10-30')}, str(sorted(S3.objects)))
+    ok('request archived whole, DynamoDB numbers as JSON numbers',
+       read('2026-10-28') == [{'ID': 'A-1', 'status': 'aceito', 'creation_timestamp': d28, 'ttl': 1793500000,
+                               'waves_sent': 2, 'contact_list': ['5531900000101']}], json.dumps(read('2026-10-28')))
+    ok('23:30 in Brasília goes to that day, sets as sorted lists',
+       read('2026-10-30') == [{'ID': 'A-3', 'status': 'pendente', 'creation_timestamp': late, 'tags': ['x', 'y']}])
+    ok('today and requests without a date left out',
+       key('2026-10-31') not in S3.objects and all(r['ID'] != 'A-5' for d in ('2026-10-28', '2026-10-29', '2026-10-30') for r in read(d)))
+
+    puts = S3.puts
+    check.handle_daily_archive(_brt(2026, 10, 31, 5)[0])
+    ok('later runs the same day -> nothing rewritten', S3.puts == puts)
+
+    check.handle_daily_archive(_brt(2026, 11, 1, 3)[0])
+    ok('next day -> only the new day written', S3.puts == puts + 1 and [r['ID'] for r in read('2026-10-31')] == ['A-4'])
+
+    REQS.clear()
+    check.handle_daily_archive(_brt(2026, 11, 2, 3)[0])
+    ok('day without requests -> empty file', key('2026-11-01') in S3.objects and read('2026-11-01') == [])
+
+    S3.objects.clear()
+    S3.fail_puts, hour = 1, check.ARCHIVE_HOUR
+    check.ARCHIVE_HOUR = 0
+    try:
+        resp = check.lambda_handler({}, None)
+    finally:
+        check.ARCHIVE_HOUR, S3.fail_puts = hour, 0
+    ok('archive failure does not fail the monitor run', resp['statusCode'] == 200 and not S3.objects)
 
 
 if __name__ == '__main__':
