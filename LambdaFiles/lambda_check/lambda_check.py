@@ -3,10 +3,13 @@ import xray_lite  # subsegmentos do X-Ray; precisa vir antes de qualquer boto3.c
 import os
 import re
 import json
+import gzip
 import logging
 import urllib.request
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from botocore.exceptions import ClientError
 
 # --- Logger Configuration ---
@@ -29,6 +32,15 @@ WA_TEMPLATE_LANG = os.environ.get('WA_TEMPLATE_LANG', 'pt_BR')
 WAVE_INTERVAL_MIN = int(os.environ.get('WAVE_INTERVAL_MIN', '15'))
 # Envios simultâneos à Graph API ao avisar uma onda ou os supervisores (ver send_many).
 SEND_CONCURRENCY = int(os.environ.get('SEND_CONCURRENCY', '10'))
+# Arquivo diário dos pedidos no S3 (ligação lambda_check -> bucket, sem label). O TTL da
+# SolicitacoesAtivas apaga cada pedido 3 dias depois de criado; antes disso, a primeira
+# execução depois de ARCHIVE_HOUR (horário de Brasília) grava os pedidos de ontem num
+# único arquivo. Sem o bucket, o arquivamento não roda e o resto do monitor segue.
+ARCHIVE_BUCKET = os.environ.get('AWS_S3_BUCKET_NAME_0')
+ARCHIVE_PREFIX = os.environ.get('ARCHIVE_PREFIX', 'pedidos').strip('/')
+ARCHIVE_HOUR = int(os.environ.get('ARCHIVE_HOUR', '3'))
+# Brasília sem horário de verão desde 2019. Offset fixo: o runtime da Lambda pode não ter tzdata.
+LOCAL_TZ = timezone(timedelta(hours=-3))
 
 
 # --- Mensagens ---
@@ -53,6 +65,7 @@ ssm = boto3.client("ssm", region_name=AWS_REGION)
 dynamodb_resource = boto3.resource("dynamodb", region_name=AWS_REGION)
 users_table = dynamodb_resource.Table(DYNAMODB_USERS_TABLE_NAME)
 requests_table = dynamodb_resource.Table(DYNAMODB_REQUESTS_TABLE_NAME)
+s3 = boto3.client("s3", region_name=AWS_REGION)
 
 # --- Carregar Token do SSM Parameter Store ---
 try:
@@ -135,6 +148,16 @@ def send_many(send, targets):
 
 # --- Lógica Principal do Monitor ---
 
+def scan_all(table, **kwargs):
+    """Itens de um Scan, página a página: cada chamada lê no máximo 1 MB da tabela."""
+    while True:
+        response = table.scan(**kwargs)
+        yield from response.get('Items', [])
+        if 'LastEvaluatedKey' not in response:
+            return
+        kwargs['ExclusiveStartKey'] = response['LastEvaluatedKey']
+
+
 def get_supervisor_targets():
     """Supervisores vêm da tabela de usuários: is_supervisor = true e cadastro aprovado.
     Devolve o wa_jid (número real de onde a pessoa fala) ou o ID."""
@@ -169,7 +192,8 @@ def handle_pending_requests(now, start_time_iso):
     logger.info("Checking for overdue pending requests...")
     one_hour_ago = now - timedelta(hours=1)
     
-    response = requests_table.scan(
+    items = scan_all(
+        requests_table,
         FilterExpression='attribute_not_exists(escalated) AND attribute_not_exists(waves) AND #st = :status AND creation_timestamp > :start_time',
         ExpressionAttributeNames={'#st': 'status'},
         ExpressionAttributeValues={
@@ -177,8 +201,8 @@ def handle_pending_requests(now, start_time_iso):
             ':start_time': start_time_iso
         }
     )
-    
-    for item in response.get('Items', []):
+
+    for item in items:
         timestamp_str = item.get('creation_timestamp')
         if not timestamp_str:
             logger.warning(f"Skipping request {item.get('ID', 'N/A')} because it is missing 'creation_timestamp'.")
@@ -265,7 +289,8 @@ def handle_stale_conversations(now, start_time_iso):
     logger.info("Checking for stale conversations...")
     one_hour_ago = now - timedelta(hours=1)
     
-    response = users_table.scan(
+    items = scan_all(
+        users_table,
         FilterExpression='conversation_state <> :initial AND state_last_updated > :start_time',
         ExpressionAttributeValues={
             ':initial': 'initial',
@@ -273,7 +298,7 @@ def handle_stale_conversations(now, start_time_iso):
         }
     )
 
-    for item in response.get('Items', []):
+    for item in items:
         timestamp_str = item.get('state_last_updated')
         if not timestamp_str:
             logger.warning(f"Skipping user {item.get('ID', 'N/A')} because 'state_last_updated' is missing unexpectedly.")
@@ -295,13 +320,14 @@ def handle_pending_feedback(now):
     logger.info("Checking for pending feedback messages...")
     cutoff = now - timedelta(minutes=FEEDBACK_DELAY_MINUTES)
 
-    response = requests_table.scan(
+    items = scan_all(
+        requests_table,
         FilterExpression='#st = :status AND feedback_pending = :true',
         ExpressionAttributeNames={'#st': 'status'},
         ExpressionAttributeValues={':status': 'aceito', ':true': True}
     )
 
-    for item in response.get('Items', []):
+    for item in items:
         timestamp_str = item.get('acceptance_timestamp')
         if not timestamp_str:
             logger.warning(f"Skipping request {item.get('ID', 'N/A')} for feedback: missing 'acceptance_timestamp'.")
@@ -323,6 +349,74 @@ def handle_pending_feedback(now):
                 UpdateExpression='SET feedback_pending = :false',
                 ExpressionAttributeValues={':false': False}
             )
+
+
+def archive_key(day):
+    """Um arquivo por dia de criação; a pasta dt= é a partição de data que o Athena lê."""
+    return f"{ARCHIVE_PREFIX}/dt={day.isoformat()}/pedidos.json.gz"
+
+
+def is_archived(day):
+    try:
+        s3.head_object(Bucket=ARCHIVE_BUCKET, Key=archive_key(day))
+        return True
+    except ClientError as e:
+        if e.response.get('Error', {}).get('Code') in ('404', 'NoSuchKey', 'NotFound'):
+            return False
+        raise
+
+
+def _json_default(value):
+    """Tipos que o DynamoDB devolve e o json não conhece: número vira Decimal, conjunto vira set."""
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
+    if isinstance(value, (set, frozenset)):
+        return sorted(value, key=str)
+    raise TypeError(f"Unexpected type {type(value).__name__} in a request item")
+
+
+def write_archive(day, items):
+    """JSON Lines com gzip: um pedido por linha, como está na tabela. Regravar o mesmo dia
+    substitui o arquivo, então uma execução repetida não duplica pedidos."""
+    items = sorted(items, key=lambda it: (it.get('creation_timestamp', ''), it.get('ID', '')))
+    lines = ''.join(json.dumps(it, ensure_ascii=False, sort_keys=True, default=_json_default) + '\n' for it in items)
+    s3.put_object(Bucket=ARCHIVE_BUCKET, Key=archive_key(day), Body=gzip.compress(lines.encode('utf-8')),
+                  ContentType='application/x-ndjson')
+    logger.info(f"Archived {len(items)} requests of {day} to s3://{ARCHIVE_BUCKET}/{archive_key(day)}.")
+
+
+def handle_daily_archive(now):
+    """(5) Grava no S3 os pedidos de cada dia antes de o TTL apagá-los. Roda na primeira
+    execução depois de ARCHIVE_HOUR em que o arquivo de ontem ainda não existe; se falhar,
+    a execução seguinte tenta de novo. Também grava qualquer dia anterior ainda presente na
+    tabela e sem arquivo, o que cobre a primeira execução e os dias de uma falha longa."""
+    if not ARCHIVE_BUCKET:
+        logger.warning("AWS_S3_BUCKET_NAME_0 not set: daily request archive skipped.")
+        return
+    local_now = now.astimezone(LOCAL_TZ)
+    if local_now.hour < ARCHIVE_HOUR:
+        return
+    yesterday = local_now.date() - timedelta(days=1)
+    if is_archived(yesterday):
+        return
+
+    logger.info(f"Archiving requests created up to {yesterday} (Brasília time)...")
+    by_day = defaultdict(list)
+    for item in scan_all(requests_table):
+        timestamp_str = item.get('creation_timestamp')
+        if not timestamp_str:
+            logger.warning(f"Request {item.get('ID', 'N/A')} has no 'creation_timestamp': left out of the archive.")
+            continue
+        day = _utc(timestamp_str).astimezone(LOCAL_TZ).date()
+        if day <= yesterday:
+            by_day[day].append(item)
+
+    for day in sorted(by_day):
+        if day != yesterday and is_archived(day):
+            continue
+        write_archive(day, by_day[day])
+    if yesterday not in by_day:
+        write_archive(yesterday, [])  # dia sem pedidos: o arquivo vazio encerra a busca do dia
 
 
 # --- Handler Principal da Lambda ---
@@ -347,6 +441,12 @@ def lambda_handler(event, context):
         handle_stale_conversations(now, two_hours_ago_iso)
 
         handle_pending_feedback(now)
+
+        # Por último e à parte: uma falha no S3 não pode atrasar nem impedir os avisos acima.
+        try:
+            handle_daily_archive(now)
+        except Exception as e:
+            logger.error(f"ARCHIVE FAILED: daily request archive not written, next run retries: {e}", exc_info=True)
 
         logger.info("Monitor run completed successfully.")
         return {'statusCode': 200, 'body': json.dumps('Monitor run completed.')}

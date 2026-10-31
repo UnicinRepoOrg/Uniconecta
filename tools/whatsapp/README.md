@@ -32,6 +32,9 @@ python3 tools/whatsapp/create_templates.py --status
 | `DISPATCH_MODE` | ✓ | | | `broadcast` (padrão: rede toda de uma vez) ou `waves` (ondas por CEP) |
 | `WAVE_INTERVAL_MIN` | ✓ | ✓ | | opcional: `15` (minutos entre ondas e até o supervisor); mesmo valor nas duas |
 | `MIN_ONDA` | ✓ | | | opcional: `10` (mínimo de pessoas por onda) |
+| `REQUEST_TTL_DAYS` | ✓ | | | opcional: `3` (dias até o TTL apagar o pedido da `SolicitacoesAtivas`) |
+| `AWS_S3_BUCKET_NAME_0` | | ✓ | | nome do bucket do arquivo diário, escrito pela ligação do `lambda_check` com o bucket (sem label). Sem ela, o arquivamento não roda |
+| `ARCHIVE_HOUR` / `ARCHIVE_PREFIX` | | ✓ | | opcionais: `3` (hora de Brasília a partir da qual o dia anterior é gravado) / `pedidos` |
 
 - O papel IAM da **UniconectaApp** precisa de `ssm:GetParameter` (e `kms:Decrypt`, se a chave KMS for própria) nesse parâmetro. Se o envio falhar, a aprovação continua funcionando: só fica um log.
 - Timeout do BOT ≥ 30s. O alerta sai para a rede com até `SEND_CONCURRENCY` envios ao mesmo tempo (padrão `10`, nas duas Lambdas): 400 pessoas levam cerca de 15 s, contra mais de 2 minutos em sequência. A Meta aceita 80 mensagens/s por número; não passe de 40.
@@ -39,6 +42,16 @@ python3 tools/whatsapp/create_templates.py --status
 
 ## Supervisores
 O alerta de solicitação pendente há mais de 1h (`lambda_check`) vai para os usuários do `DBBot` com **`is_supervisor` = `true`** (Boolean) e `status` = `approved`. Para incluir ou tirar alguém, edite o item no console do DynamoDB. Nenhum número fica no código.
+
+## Pedidos: TTL de 3 dias e arquivo diário no S3
+A `SolicitacoesAtivas` guarda só os pedidos recentes: o BOT grava em cada pedido o campo `ttl` (criação + `REQUEST_TTL_DAYS`), e o TTL da tabela apaga o pedido depois disso. A `DBBot` não tem TTL. O histórico fica no S3, para análise:
+
+- A cada execução depois das 3h (horário de Brasília), o `lambda_check` confere se existe `pedidos/dt=<ontem>/pedidos.json.gz` no bucket. Se não existe, lê a `SolicitacoesAtivas` e grava um arquivo por dia de criação: ontem e qualquer dia anterior que ainda esteja na tabela sem arquivo. Um dia sem pedidos gera um arquivo vazio.
+- Formato: JSON Lines com gzip, um pedido por linha, inteiro, como está na tabela, inclusive telefone e nome. O bucket é privado, com o acesso público bloqueado e a criptografia padrão do S3.
+- Se a gravação falhar, o log traz `ARCHIVE FAILED` e a execução seguinte tenta de novo. Os avisos do monitor não dependem do arquivamento.
+- O Athena lê a pasta `dt=` como partição de data.
+
+**Ordem de ativação:** deploy do BOT e do `lambda_check` com o bucket ligado → conferir no bucket os arquivos dos dias que já estão na tabela, gravados na primeira execução depois das 3h → só então ligar o TTL no campo `ttl` da `SolicitacoesAtivas`. Os pedidos gravados antes desta versão têm prazo de 24 horas: com o TTL ligado antes, eles seriam apagados sem cópia.
 
 ## Envio em ondas por CEP (`DISPATCH_MODE=waves`)
 Em vez de avisar a rede toda de uma vez, o BOT avisa primeiro quem mora mais perto de quem pediu, e o `lambda_check` amplia o envio a cada `WAVE_INTERVAL_MIN` enquanto o pedido estiver pendente:
