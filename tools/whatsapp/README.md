@@ -1,6 +1,6 @@
 # WhatsApp Business Cloud API (Meta): setup e testes
 
-O bot (`LambdaFiles/BOT`), o monitor (`LambdaFiles/lambda_check`) e a API do site (`LambdaFiles/UniconectaApp`) usam a **WhatsApp Cloud API** da Meta (`POST {GRAPH_API_URL}/{WA_PHONE_NUMBER_ID}/messages`). O Whapi.cloud não é mais usado.
+O bot (`LambdaFiles/BOT`), o monitor (`LambdaFiles/lambda_check`) e a API do site (`LambdaFiles/UniconectaApp`) usam a **WhatsApp Cloud API** da Meta (`POST {GRAPH_API_URL}/{WA_PHONE_NUMBER_ID}/messages`).
 
 ## Regra das 24h e templates
 A Meta só aceita mensagem livre (texto, botões) para quem falou com o número nas últimas 24h. Fora disso, só **template aprovado**:
@@ -23,7 +23,7 @@ python3 tools/whatsapp/create_templates.py --status
 
 | Variável | BOT | lambda_check | UniconectaApp | Valor |
 |---|---|---|---|---|
-| `GRAPH_API_URL` | ✓ | ✓ | ✓ | `https://graph.facebook.com/v26.0` (substitui `API_URL`, pode remover) |
+| `GRAPH_API_URL` | ✓ | ✓ | ✓ | `https://graph.facebook.com/v26.0` |
 | `WA_PHONE_NUMBER_ID` | ✓ | ✓ | ✓ | `1413979345131573` |
 | `AWS_SSM_PARAMETER_NAME_0` | ✓ | ✓ | ✓ **novo** | mesmo parâmetro SSM; **valor (SecureString) = access token da Meta** |
 | `WA_VERIFY_TOKEN` | ✓ | | | string aleatória; a mesma no painel de webhook da Meta |
@@ -75,15 +75,14 @@ Em vez de avisar a rede toda de uma vez, o BOT avisa primeiro quem mora mais per
 
 **Ordem de ativação:** deploy das 3 Lambdas → conferir o agendamento do `lambda_check` → `DISPATCH_MODE=waves` no BOT. Para voltar atrás, `DISPATCH_MODE=broadcast`.
 
-## Checklist de virada (cutover)
+## Checklist de ativação de um ambiente
 1. Atualizar o valor do parâmetro SSM com o token da Meta e criar as variáveis acima.
 2. Deploy das 3 Lambdas (CloudMan pull Git → AWS).
-3. Meta App → WhatsApp → Configuração → Webhook: **Callback URL** = URL pública do BOT (a mesma que hoje está no Whapi); **Verify token** = `WA_VERIFY_TOKEN`; assinar o campo **messages**.
+3. Meta App → WhatsApp → Configuração → Webhook: **Callback URL** = URL pública do BOT, `https://<domínio do ambiente>/api/BOT` (no dev, `https://dev.uniconecta.app.unicin.org/api/BOT`); **Verify token** = `WA_VERIFY_TOKEN`; assinar o campo **messages**.
 4. Inscrever o app na WABA (se `--check` mostrar `subscribed_apps` vazio):
    `curl -X POST "https://graph.facebook.com/v26.0/1097407789946330/subscribed_apps" -H "Authorization: Bearer $TOKEN"`
 5. Número registrado na Cloud API, com forma de pagamento na WABA (templates são cobrados).
-6. **Desligar o webhook / canal do Whapi**, para cada mensagem não ser tratada duas vezes.
-7. Smoke test: mande "oi" de um número aprovado → menu; faça login no admin, aprove um cadastro de teste → boas-vindas; faça uma solicitação → alerta no outro número → Aceitar.
+6. Smoke test: mande "oi" de um número aprovado → menu; faça login no admin, aprove um cadastro de teste → boas-vindas; faça uma solicitação → alerta no outro número → Aceitar.
 
 ## Teste E2E local
 `e2e_local.py` roda as 3 Lambdas reais com DynamoDB/SSM em memória (não precisa de AWS nem de boto3).
