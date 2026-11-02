@@ -41,6 +41,13 @@ ARCHIVE_PREFIX = os.environ.get('ARCHIVE_PREFIX', 'pedidos').strip('/')
 ARCHIVE_HOUR = int(os.environ.get('ARCHIVE_HOUR', '3'))
 # Brasília sem horário de verão desde 2019. Offset fixo: o runtime da Lambda pode não ter tzdata.
 LOCAL_TZ = timezone(timedelta(hours=-3))
+# Blue/green: during a release the old and the new version both run this monitor on the same
+# tables, each with its own Timer. APP_STAGE is the qualified stage ("dev", or "prod-2" in a
+# blue/green slot) and the TRAFFIC parameter holds the split the pipeline writes, as
+# {"prod": {"blue": "1", "green": "2", "greenPercentage": 100}}. Only the version that takes the
+# traffic sends; the router uses the same rule.
+APP_STAGE = os.environ.get('APP_STAGE', '')
+TRAFFIC_PARAM_NAME = os.environ.get('AWS_SSM_PARAMETER_NAME_TRAFFIC')
 
 
 # --- Mensagens ---
@@ -146,6 +153,78 @@ def send_many(send, targets):
 # --- FUNÇÃO send_nps_survey REMOVIDA ---
 
 
+# --- Versão ativa (blue/green) ---
+
+def active_version(split):
+    """The version that takes the traffic: green once it has 100%, blue before that, so a
+    rollback to 0% brings everything back to blue."""
+    if split.get('green') and _percentage(split.get('greenPercentage')) >= 100:
+        return str(split['green'])
+    return str(split.get('blue') or '')
+
+
+def _percentage(value):
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def read_traffic_split(stage):
+    """This stage's entry in the TRAFFIC parameter, or None when it has none yet."""
+    value = ssm.get_parameter(Name=TRAFFIC_PARAM_NAME)['Parameter']['Value']
+    split = json.loads(value or '{}').get(stage)
+    return split if isinstance(split, dict) else None
+
+
+def is_active_version():
+    """Whether this deployment should send. A stage with no version ("dev", "test") is not
+    blue/green and always sends; there the split is only read and logged, so the permission
+    and the parameter are exercised before a release depends on them."""
+    stage, sep, version = APP_STAGE.rpartition('-')
+    if not sep or not version.isdigit():
+        if TRAFFIC_PARAM_NAME:
+            try:
+                logger.info(f"Traffic parameter read (not used outside blue/green): {ssm.get_parameter(Name=TRAFFIC_PARAM_NAME)['Parameter']['Value']}")
+            except Exception as e:
+                logger.warning(f"Traffic parameter {TRAFFIC_PARAM_NAME} not readable: {e}")
+        return True
+    if not TRAFFIC_PARAM_NAME:
+        logger.warning(f"{APP_STAGE}: no TRAFFIC parameter connected; sending as before blue/green.")
+        return True
+    try:
+        split = read_traffic_split(stage)
+    except Exception as e:
+        # Both versions may fail here at once and skip a run; sending from both is worse.
+        logger.error(f"{APP_STAGE}: traffic split not readable, nothing sent this run: {e}")
+        return False
+    if not split or not split.get('blue'):
+        logger.info(f"{APP_STAGE}: no traffic split for stage '{stage}' yet; sending.")
+        return True
+    active = active_version(split)
+    if active != version:
+        logger.info(f"{APP_STAGE}: version {active} takes the traffic; this one ({version}) sends nothing.")
+        return False
+    return True
+
+
+def claim(table, key, update, condition, names=None, values=None):
+    """Conditional update made BEFORE a send: True when this run took the item, False when
+    another run (the other blue/green version, or an overlapping one) already did."""
+    kwargs = {'Key': key, 'UpdateExpression': update, 'ConditionExpression': condition}
+    if names:
+        kwargs['ExpressionAttributeNames'] = names
+    if values:
+        kwargs['ExpressionAttributeValues'] = values
+    try:
+        table.update_item(**kwargs)
+        return True
+    except ClientError as e:
+        if e.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            return False
+        raise
+
+
 # --- Lógica Principal do Monitor ---
 
 def scan_all(table, **kwargs):
@@ -179,11 +258,16 @@ def get_supervisor_targets():
 
 
 def escalate_to_supervisors(request_id, message):
+    # Marked before sending, so a second run cannot escalate the same request again. As before,
+    # a request stays escalated even when every send fails.
+    if not claim(requests_table, {'ID': request_id}, 'SET escalated = :val', 'attribute_not_exists(escalated)',
+                 values={':val': True}):
+        logger.info(f"Request {request_id}: already escalated by another run; skipping.")
+        return
     supervisors = get_supervisor_targets()
     if not supervisors:
         logger.error("No supervisor in the users table (is_supervisor = true, status = approved): overdue request not escalated to anyone.")
     send_many(lambda supervisor_num: send_text(supervisor_num, message), supervisors)
-    requests_table.update_item(Key={'ID': request_id}, UpdateExpression='SET escalated = :val', ExpressionAttributeValues={':val': True})
 
 
 def handle_pending_requests(now, start_time_iso):
@@ -308,10 +392,21 @@ def handle_stale_conversations(now, start_time_iso):
         if last_updated < one_hour_ago:
             user_id = item['ID']
             user_id_wa = item.get('wa_jid') or user_id  # número real de onde a pessoa fala
-            logger.warning(f"User {user_id} has a stale conversation state ({item['conversation_state']}). Resetting.")
-            
-            if send_main_menu_with_buttons(user_id_wa):
-                users_table.update_item(Key={'ID': user_id}, UpdateExpression='SET conversation_state = :state', ExpressionAttributeValues={':state': 'initial'})
+            state = item['conversation_state']
+            logger.warning(f"User {user_id} has a stale conversation state ({state}). Resetting.")
+
+            # Reset before sending, and only if the user did not move since the scan: another run
+            # that already reset them, or a new message from them, leaves this one without a send.
+            if not claim(users_table, {'ID': user_id}, 'SET conversation_state = :initial',
+                         'conversation_state = :state AND state_last_updated = :ts',
+                         values={':initial': 'initial', ':state': state, ':ts': timestamp_str}):
+                logger.info(f"User {user_id}: state changed since the scan; skipping.")
+                continue
+            if not send_main_menu_with_buttons(user_id_wa):
+                # Put the state back so the next run tries again, as when the reset came after the send.
+                claim(users_table, {'ID': user_id}, 'SET conversation_state = :state',
+                      'conversation_state = :initial AND state_last_updated = :ts',
+                      values={':initial': 'initial', ':state': state, ':ts': timestamp_str})
 
 
 def handle_pending_feedback(now):
@@ -342,13 +437,16 @@ def handle_pending_feedback(now):
             logger.warning(f"Skipping request {item['ID']} for feedback: no requester target.")
             continue
 
+        # Cleared before sending, so a second run cannot send the same feedback again.
+        if not claim(requests_table, {'ID': item['ID']}, 'SET feedback_pending = :false', 'feedback_pending = :true',
+                     values={':false': False, ':true': True}):
+            logger.info(f"Request {item['ID']}: feedback already sent by another run; skipping.")
+            continue
         logger.info(f"Sending delayed feedback for request {item['ID']} to {target}.")
-        if send_text(f"{target}@s.whatsapp.net", FEEDBACK_PROMPT):
-            requests_table.update_item(
-                Key={'ID': item['ID']},
-                UpdateExpression='SET feedback_pending = :false',
-                ExpressionAttributeValues={':false': False}
-            )
+        if not send_text(f"{target}@s.whatsapp.net", FEEDBACK_PROMPT):
+            # Pending again, so the next run tries again, as when the flag was cleared after the send.
+            claim(requests_table, {'ID': item['ID']}, 'SET feedback_pending = :true', 'feedback_pending = :false',
+                  values={':false': False, ':true': True})
 
 
 def archive_key(day):
@@ -429,7 +527,10 @@ def lambda_handler(event, context):
     # Calcular o ponto de início para o filtro (2 horas atrás)
     two_hours_ago = now - timedelta(hours=2)
     two_hours_ago_iso = two_hours_ago.isoformat()
-    
+
+    if not is_active_version():
+        return {'statusCode': 200, 'body': json.dumps('Inactive version: nothing sent.')}
+
     try:
         # Passar o novo tempo de início para as funções
         handle_pending_requests(now, two_hours_ago_iso)
