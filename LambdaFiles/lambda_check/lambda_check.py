@@ -45,9 +45,19 @@ LOCAL_TZ = timezone(timedelta(hours=-3))
 # tables, each with its own Timer. APP_STAGE is the qualified stage ("dev", or "prod-2" in a
 # blue/green slot) and the TRAFFIC parameter holds the split the pipeline writes, as
 # {"prod": {"blue": "1", "green": "2", "greenPercentage": 100}}. Only the version that takes the
-# traffic sends; the router uses the same rule.
+# traffic sends; the router uses the same rule. A stage with no version ("dev", "test") is not
+# blue/green: it always sends and never reads the parameter.
 APP_STAGE = os.environ.get('APP_STAGE', '')
 TRAFFIC_PARAM_NAME = os.environ.get('AWS_SSM_PARAMETER_NAME_TRAFFIC')
+
+
+def split_stage(app_stage):
+    """("prod", "2") for "prod-2"; (app_stage, None) for a stage with no version."""
+    stage, sep, version = app_stage.rpartition('-')
+    return (stage, version) if sep and version.isdigit() else (app_stage, None)
+
+
+STAGE, VERSION = split_stage(APP_STAGE)
 
 
 # --- Mensagens ---
@@ -178,16 +188,10 @@ def read_traffic_split(stage):
 
 
 def is_active_version():
-    """Whether this deployment should send. A stage with no version ("dev", "test") is not
-    blue/green and always sends; there the split is only read and logged, so the permission
-    and the parameter are exercised before a release depends on them."""
-    stage, sep, version = APP_STAGE.rpartition('-')
-    if not sep or not version.isdigit():
-        if TRAFFIC_PARAM_NAME:
-            try:
-                logger.info(f"Traffic parameter read (not used outside blue/green): {ssm.get_parameter(Name=TRAFFIC_PARAM_NAME)['Parameter']['Value']}")
-            except Exception as e:
-                logger.warning(f"Traffic parameter {TRAFFIC_PARAM_NAME} not readable: {e}")
+    """Whether this deployment should send. Read on every run: the pipeline changes the split
+    without a deploy, and a warm container would keep a value read at start."""
+    stage, version = STAGE, VERSION
+    if version is None:
         return True
     if not TRAFFIC_PARAM_NAME:
         logger.warning(f"{APP_STAGE}: no TRAFFIC parameter connected; sending as before blue/green.")
