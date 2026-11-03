@@ -422,6 +422,19 @@ def handle_login(event):
     return respond(200, {'token': jwt_encode({'sub': email, 'role': 'admin', 'exp': exp}), 'expires_at': exp})
 
 
+# O nome da função termina no estágio: UniconectaApp-dev, UniconectaApp-prod-2
+# (o número é a versão blue/green). Lido do nome, o estágio não precisa de
+# variável de ambiente nem de mudança no canvas.
+_STAGE_SUFFIX = re.compile(r'-([a-z]+)(?:-(\d+))?$')
+
+
+def handle_version(event):
+    match = _STAGE_SUFFIX.search(os.environ.get('AWS_LAMBDA_FUNCTION_NAME', ''))
+    if not match:
+        return respond(200, {'stage': None, 'version': None})
+    return respond(200, {'stage': match.group(1), 'version': match.group(2)})
+
+
 # =====================================================================
 #  Endpoints — admin (Bearer)
 # =====================================================================
@@ -524,6 +537,8 @@ def lambda_handler(event, context):
             return handle_cadastro(event)
         if method == 'POST' and path == '/auth/login':
             return handle_login(event)
+        if method == 'GET' and path == '/version':
+            return handle_version(event)
 
         # Rotas admin (Bearer)
         recipient_match = re.match(r'^/recipients/([^/]+)$', path)
