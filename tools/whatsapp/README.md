@@ -24,8 +24,8 @@ python3 tools/whatsapp/create_templates.py --status
 | Variável | BOT | lambda_check | UniconectaApp | Valor |
 |---|---|---|---|---|
 | `GRAPH_API_URL` | ✓ | ✓ | ✓ | `https://graph.facebook.com/v26.0` |
-| `WA_PHONE_NUMBER_ID` | ✓ | ✓ | ✓ | `1413979345131573` |
-| `AWS_SSM_PARAMETER_NAME_0` | ✓ | ✓ | ✓ **novo** | mesmo parâmetro SSM; **valor (SecureString) = access token da Meta** |
+| `AWS_SSM_PARAMETER_NAME_0` | ✓ | ✓ | ✓ | nome do parâmetro SSM `whapikey`, o mesmo nas três. Valor (SecureString): ver [Token e número](#token-e-número) |
+| `WA_PHONE_NUMBER_ID` | ✓ | ✓ | ✓ | formato anterior, usado só quando o parâmetro do token não traz `phone_number_id` |
 | `AWS_SSM_PARAMETER_NAME_APP_SECRET` | ✓ **obrigatória** | | | nome do parâmetro SSM `whatsapp-app-secret`, escrito pela ligação do BOT com label `app_secret`. Valor (SecureString): ver [Segredos do webhook](#segredos-do-webhook). O BOT só sobe com ela e recusa com 401 toda requisição sem `X-Hub-Signature-256` válido |
 | `WA_TEMPLATE_ALERT` / `WA_TEMPLATE_WELCOME` / `WA_TEMPLATE_LANG` | ✓ | ✓ | ✓ | opcionais: `alerta_rede_apoio` / `boas_vindas_aprovado` / `pt_BR` |
 | `DISPATCH_MODE` | ✓ | | | `broadcast` (padrão: rede toda de uma vez) ou `waves` (ondas por CEP) |
@@ -38,6 +38,20 @@ python3 tools/whatsapp/create_templates.py --status
 - O papel IAM da **UniconectaApp** precisa de `ssm:GetParameter` (e `kms:Decrypt`, se a chave KMS for própria) nesse parâmetro. Se o envio falhar, a aprovação continua funcionando: só fica um log.
 - Timeout do BOT ≥ 30s. O alerta sai para a rede com até `SEND_CONCURRENCY` envios ao mesmo tempo (padrão `10`, nas duas Lambdas): 400 pessoas levam cerca de 15 s, contra mais de 2 minutos em sequência. A Meta aceita 80 mensagens/s por número; não passe de 40.
 - Token: use um **System User token permanente** (Business Settings → Usuários do sistema) com `whatsapp_business_messaging` e `whatsapp_business_management`. Nunca no git.
+
+## Token e número
+O parâmetro `whapikey-<estágio>` diz por qual número da Meta o estágio envia, em JSON:
+
+```json
+{"access_token": "<token do System User>", "phone_number_id": "<WhatsApp → API Setup → Phone number ID>"}
+```
+
+- Cada estágio tem o seu parâmetro, então trocar o número de um estágio é só editar o parâmetro dele. O dev, por exemplo, pode usar o número de teste do app de teste, com o `app_secret` desse app em `whatsapp-app-secret-dev`.
+- O `phone_number_id` do parâmetro tem precedência sobre a variável `WA_PHONE_NUMBER_ID`.
+- Um valor que não é JSON é lido inteiro como token, e o número vem de `WA_PHONE_NUMBER_ID`. É o formato anterior, aceito durante a migração.
+- Grave o JSON só depois que a versão com este código estiver no ar em todas as Lambdas que leem o parâmetro. O código anterior lê o JSON inteiro como token, e todo envio falha.
+- JSON inválido, ou sem `access_token`, impede o BOT e o `lambda_check` de subir, e o log traz o motivo sem o valor. Sem número no JSON nem na variável, as duas também não sobem. A UniconectaApp sobe mesmo assim e só registra no log que a boas-vindas não foi enviada.
+- As três Lambdas leem o parâmetro só ao iniciar uma instância. Depois de editar o valor, publique as funções de novo (apply) para que todas as instâncias leiam o valor novo.
 
 ## Segredos do webhook
 O parâmetro `whatsapp-app-secret-<estágio>` guarda os dois segredos do webhook da Meta, em JSON:
