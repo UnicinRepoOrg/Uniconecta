@@ -23,12 +23,15 @@ npm test
 
 1. Faça push das mudanças em uma branch e abra o pull request. O workflow **Site build**
    compila e roda os testes no pull request.
-2. Em **Actions → Site build → Run workflow**, escolha a branch do pull request. O
-   workflow compila de novo, troca o conteúdo de `SiteFiles/ccci-chatbot` pelo build e
-   faz commit na mesma branch.
-3. Faça o merge do pull request e rode o pipeline do estágio no canvas.
+2. Faça o merge. O workflow compila de novo, troca o conteúdo de
+   `SiteFiles/ccci-chatbot` pelo build e faz commit na `main`, com a mensagem
+   `Site build v<versão>`.
+3. Depois desse commit, rode o pipeline do estágio no canvas.
 
-Não faça commit de um build feito na sua máquina: o número da versão vem do workflow.
+Para refazer o build sem mudar o código, use **Actions → Site build → Run workflow**.
+
+Não faça commit de um build feito na sua máquina nem edite `SiteFiles/ccci-chatbot` à
+mão: o número da versão vem do workflow, e o próximo merge substitui a pasta inteira.
 
 ## Versão no rodapé
 

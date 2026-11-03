@@ -3,23 +3,34 @@
 #
 # - Pull request que mexe no código do site: só compila e roda os testes, para
 #   o revisor saber que o código builda. Nada é gravado.
-# - Execução manual (Actions → Site build → Run workflow), escolhendo a branch:
-#   compila, troca o conteúdo de SiteFiles/ccci-chatbot pelo build e faz commit
-#   nessa mesma branch. O próximo run do pipeline no canvas publica esse commit.
+# - Merge na main que mexe no código do site: compila, troca o conteúdo de
+#   SiteFiles/ccci-chatbot pelo build e faz commit na main. O próximo run do
+#   pipeline no canvas publica esse commit.
+# - Execução manual (Actions → Site build → Run workflow): faz o mesmo que o
+#   merge, na branch escolhida. Serve para refazer um build sem mudar o código.
+#
+# O commit do build mexe só em SiteFiles, e push feito com o GITHUB_TOKEN não
+# dispara outro workflow, então ele não gera um build novo.
 #
 # A versão do software no rodapé é <major do package.json>.<número desta execução>.
 name: Site build
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "SiteSource/ccci-chatbot/**"
   pull_request:
     paths:
       - "SiteSource/ccci-chatbot/**"
       - ".github/workflows/site-build.yml"
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+# Uma execução por branch de cada vez: dois merges seguidos geram dois builds em
+# sequência, e o último a gravar é o do código mais novo.
 concurrency:
   group: site-build-${{ github.ref }}
   cancel-in-progress: false
@@ -57,10 +68,16 @@ jobs:
           name: site-v${{ steps.version.outputs.app }}
           path: SiteSource/ccci-chatbot/dist
 
+      # Grava sobre a ponta atual da branch, não sobre o commit que disparou o
+      # build: o commit de build de uma execução anterior pode ter entrado
+      # depois, e o push sobre o commit antigo seria recusado. O dist e o
+      # node_modules ficam no lugar, porque o git os ignora.
       - name: Gravar o build em SiteFiles
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name != 'pull_request'
         working-directory: .
         run: |
+          git fetch origin "$GITHUB_REF_NAME"
+          git checkout -B site-build "origin/$GITHUB_REF_NAME"
           rm -rf SiteFiles/ccci-chatbot
           cp -r SiteSource/ccci-chatbot/dist SiteFiles/ccci-chatbot
           git add -A SiteFiles/ccci-chatbot
@@ -71,4 +88,4 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
           git commit -m "Site build v${{ steps.version.outputs.app }}"
-          git push
+          git push origin "HEAD:$GITHUB_REF_NAME"
