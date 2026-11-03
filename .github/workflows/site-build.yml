@@ -1,0 +1,74 @@
+# Build do site (SiteSource/ccci-chatbot) para a pasta que o canvas publica
+# (SiteFiles/ccci-chatbot).
+#
+# - Pull request que mexe no código do site: só compila e roda os testes, para
+#   o revisor saber que o código builda. Nada é gravado.
+# - Execução manual (Actions → Site build → Run workflow), escolhendo a branch:
+#   compila, troca o conteúdo de SiteFiles/ccci-chatbot pelo build e faz commit
+#   nessa mesma branch. O próximo run do pipeline no canvas publica esse commit.
+#
+# A versão do software no rodapé é <major do package.json>.<número desta execução>.
+name: Site build
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "SiteSource/ccci-chatbot/**"
+      - ".github/workflows/site-build.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: site-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: SiteSource/ccci-chatbot
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: SiteSource/ccci-chatbot/package-lock.json
+
+      - run: npm ci --no-audit --no-fund
+
+      - run: npm test
+
+      - name: Build
+        run: npm run build
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+
+      - name: Versão
+        id: version
+        run: echo "app=$(node -p "require('./package.json').version.split('.')[0]").${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site-v${{ steps.version.outputs.app }}
+          path: SiteSource/ccci-chatbot/dist
+
+      - name: Gravar o build em SiteFiles
+        if: github.event_name == 'workflow_dispatch'
+        working-directory: .
+        run: |
+          rm -rf SiteFiles/ccci-chatbot
+          cp -r SiteSource/ccci-chatbot/dist SiteFiles/ccci-chatbot
+          git add -A SiteFiles/ccci-chatbot
+          if git diff --cached --quiet; then
+            echo "O build é igual ao que já está em SiteFiles/ccci-chatbot; nada a gravar."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Site build v${{ steps.version.outputs.app }}"
+          git push
