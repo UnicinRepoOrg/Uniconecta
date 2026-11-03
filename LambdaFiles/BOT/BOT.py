@@ -27,15 +27,15 @@ DYNAMODB_USERS_TABLE_NAME = os.environ.get('AWS_DYNAMODB_TABLE_NAME_0') or os.en
 DYNAMODB_REQUESTS_TABLE_NAME = os.environ.get('AWS_DYNAMODB_TABLE_NAME_1') or os.environ.get('AWS_DYNAMODB_TABLE_TARGET_NAME_1')
 AWS_REGION = os.environ.get('REGION', 'us-east-1')
 PARAM_NAME_TOKEN = os.environ.get('AWS_SSM_PARAMETER_NAME_0') or os.getenv("AWS_SSM_PARAMETER_TARGET_NAME_0")
-# Parâmetro com a Chave secreta do app da Meta (valida X-Hub-Signature-256). Obrigatório; o valor
-# nunca passa por variável de ambiente, só o nome do parâmetro (a ligação com label "app_secret" no canvas).
+# Parâmetro com os segredos do webhook da Meta: a Chave secreta do app (valida X-Hub-Signature-256) e o
+# verify token (GET hub.challenge). Obrigatório; os valores nunca passam por variável de ambiente, só o
+# nome do parâmetro (a ligação com label "app_secret" no canvas).
 PARAM_NAME_APP_SECRET = os.environ.get('AWS_SSM_PARAMETER_NAME_APP_SECRET')
 STATUS_INDEX = os.environ.get('STATUS_INDEX_NAME', 'StatusIndex')
 
 # --- WhatsApp Business Cloud API (Meta) ---
 GRAPH_API_URL = os.environ.get('GRAPH_API_URL', 'https://graph.facebook.com/v26.0').rstrip('/')
 WA_PHONE_NUMBER_ID = os.environ.get('WA_PHONE_NUMBER_ID')
-WA_VERIFY_TOKEN = os.environ.get('WA_VERIFY_TOKEN')        # verificação do webhook (GET hub.challenge)
 WA_TEMPLATE_ALERT = os.environ.get('WA_TEMPLATE_ALERT', 'alerta_rede_apoio')
 WA_TEMPLATE_LANG = os.environ.get('WA_TEMPLATE_LANG', 'pt_BR')
 
@@ -74,13 +74,38 @@ except Exception as e:
     logger.error(f"CRITICAL ERROR loading token from SSM: {e}")
     raise e
 
-# --- Load the Meta app secret from SSM Parameter Store ---
-# Sem o segredo a função não sobe: nunca atende o webhook sem poder validar a assinatura.
+# --- Load the Meta webhook secrets from SSM Parameter Store ---
+def parse_webhook_secrets(raw):
+    """Lê o valor do parâmetro whatsapp-app-secret e devolve (app_secret, verify_token, formato).
+
+    Formato atual: JSON {"app_secret": "...", "verify_token": "..."}.
+    Formato anterior: o valor inteiro é o app secret, e não há verify token.
+    Os erros nunca citam o valor, só a posição do problema.
+    """
+    raw = (raw or '').strip()
+    if not raw.startswith('{'):
+        return raw, None, 'text'
+    try:
+        data = json.loads(raw)
+    except ValueError as e:
+        raise ValueError(f"the app secret parameter is not valid JSON (line {e.lineno}, column {e.colno})") from None
+    app_secret = str(data.get('app_secret') or '').strip()
+    verify_token = str(data.get('verify_token') or '').strip() or None
+    return app_secret, verify_token, 'json'
+
+
+# Sem o app secret a função não sobe: nunca atende o webhook sem poder validar a assinatura.
+# Sem o verify token ela sobe, e a verificação do webhook (GET) responde 403.
 try:
-    APP_SECRET = ssm.get_parameter(Name=PARAM_NAME_APP_SECRET, WithDecryption=True)["Parameter"]["Value"].strip()
+    APP_SECRET, WA_VERIFY_TOKEN, secrets_format = parse_webhook_secrets(
+        ssm.get_parameter(Name=PARAM_NAME_APP_SECRET, WithDecryption=True)["Parameter"]["Value"])
     if not APP_SECRET:
-        raise ValueError("the app secret parameter is empty")
-    logger.info("App secret loaded successfully from SSM Parameter Store.")
+        raise ValueError("the app secret parameter has no app secret")
+    logger.info(f"Webhook secrets loaded from SSM Parameter Store ({secrets_format} format, "
+                f"verify token {'present' if WA_VERIFY_TOKEN else 'absent'}).")
+    if not WA_VERIFY_TOKEN:
+        logger.warning('The app secret parameter has no verify_token: webhook verification (GET) answers 403. '
+                       'Write the parameter as {"app_secret": "...", "verify_token": "..."}.')
 except Exception as e:
     logger.error(f"CRITICAL ERROR loading the app secret from SSM: {e}")
     raise e

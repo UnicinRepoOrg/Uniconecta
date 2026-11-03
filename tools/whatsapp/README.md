@@ -26,8 +26,7 @@ python3 tools/whatsapp/create_templates.py --status
 | `GRAPH_API_URL` | ✓ | ✓ | ✓ | `https://graph.facebook.com/v26.0` |
 | `WA_PHONE_NUMBER_ID` | ✓ | ✓ | ✓ | `1413979345131573` |
 | `AWS_SSM_PARAMETER_NAME_0` | ✓ | ✓ | ✓ **novo** | mesmo parâmetro SSM; **valor (SecureString) = access token da Meta** |
-| `WA_VERIFY_TOKEN` | ✓ | | | string aleatória; a mesma no painel de webhook da Meta |
-| `AWS_SSM_PARAMETER_NAME_APP_SECRET` | ✓ **obrigatória** | | | nome do parâmetro SSM `whatsapp-app-secret`, escrito pela ligação do BOT com label `app_secret`; **valor (SecureString) = App → Configurações → Básico → Chave secreta**. O BOT só sobe com ela e recusa com 401 toda requisição sem `X-Hub-Signature-256` válido |
+| `AWS_SSM_PARAMETER_NAME_APP_SECRET` | ✓ **obrigatória** | | | nome do parâmetro SSM `whatsapp-app-secret`, escrito pela ligação do BOT com label `app_secret`. Valor (SecureString): ver [Segredos do webhook](#segredos-do-webhook). O BOT só sobe com ela e recusa com 401 toda requisição sem `X-Hub-Signature-256` válido |
 | `WA_TEMPLATE_ALERT` / `WA_TEMPLATE_WELCOME` / `WA_TEMPLATE_LANG` | ✓ | ✓ | ✓ | opcionais: `alerta_rede_apoio` / `boas_vindas_aprovado` / `pt_BR` |
 | `DISPATCH_MODE` | ✓ | | | `broadcast` (padrão: rede toda de uma vez) ou `waves` (ondas por CEP) |
 | `WAVE_INTERVAL_MIN` | ✓ | ✓ | | opcional: `15` (minutos entre ondas e até o supervisor); mesmo valor nas duas |
@@ -39,6 +38,20 @@ python3 tools/whatsapp/create_templates.py --status
 - O papel IAM da **UniconectaApp** precisa de `ssm:GetParameter` (e `kms:Decrypt`, se a chave KMS for própria) nesse parâmetro. Se o envio falhar, a aprovação continua funcionando: só fica um log.
 - Timeout do BOT ≥ 30s. O alerta sai para a rede com até `SEND_CONCURRENCY` envios ao mesmo tempo (padrão `10`, nas duas Lambdas): 400 pessoas levam cerca de 15 s, contra mais de 2 minutos em sequência. A Meta aceita 80 mensagens/s por número; não passe de 40.
 - Token: use um **System User token permanente** (Business Settings → Usuários do sistema) com `whatsapp_business_messaging` e `whatsapp_business_management`. Nunca no git.
+
+## Segredos do webhook
+O parâmetro `whatsapp-app-secret-<estágio>` guarda os dois segredos do webhook da Meta, em JSON:
+
+```json
+{"app_secret": "<App → Configurações → Básico → Chave secreta>", "verify_token": "<string aleatória>"}
+```
+
+- `app_secret` confere a assinatura `X-Hub-Signature-256` de cada mensagem. Sem ele, o BOT não sobe.
+- `verify_token` responde à verificação do webhook (GET `hub.challenge`). É o mesmo valor do campo **Verify token** no painel de webhook da Meta. Sem ele, a verificação responde 403 e as mensagens continuam chegando: a Meta só verifica ao salvar a configuração do webhook.
+- Gere o `verify_token` com `python -c "import secrets; print(secrets.token_hex(24))"`, um por estágio.
+- Um valor que não é JSON é lido inteiro como `app_secret`. É o formato anterior, aceito durante a migração.
+- JSON inválido impede o BOT de subir, e o log traz `not valid JSON` com a linha e a coluna do erro. Depois de editar o parâmetro, faça o GET de verificação e mande uma mensagem de teste.
+- O BOT lê o parâmetro só ao iniciar uma instância. Depois de editar o valor, publique a função de novo (apply) para que todas as instâncias leiam o valor novo.
 
 ## Supervisores
 O alerta de solicitação pendente há mais de 1h (`lambda_check`) vai para os usuários do `DBBot` com **`is_supervisor` = `true`** (Boolean) e `status` = `approved`. Para incluir ou tirar alguém, edite o item no console do DynamoDB. Nenhum número fica no código.
@@ -78,7 +91,7 @@ Em vez de avisar a rede toda de uma vez, o BOT avisa primeiro quem mora mais per
 ## Checklist de ativação de um ambiente
 1. Atualizar o valor do parâmetro SSM com o token da Meta e criar as variáveis acima.
 2. Deploy das 3 Lambdas (CloudMan pull Git → AWS).
-3. Meta App → WhatsApp → Configuração → Webhook: **Callback URL** = URL pública do BOT, `https://<domínio do ambiente>/api/BOT` (no dev, `https://dev.uniconecta.app.unicin.org/api/BOT`); **Verify token** = `WA_VERIFY_TOKEN`; assinar o campo **messages**.
+3. Meta App → WhatsApp → Configuração → Webhook: **Callback URL** = URL pública do BOT, `https://<domínio do ambiente>/api/BOT` (no dev, `https://dev.uniconecta.app.unicin.org/api/BOT`); **Verify token** = o `verify_token` do parâmetro `whatsapp-app-secret-<estágio>`; assinar o campo **messages**.
 4. Inscrever o app na WABA (se `--check` mostrar `subscribed_apps` vazio):
    `curl -X POST "https://graph.facebook.com/v26.0/1097407789946330/subscribed_apps" -H "Authorization: Bearer $TOKEN"`
 5. Número registrado na Cloud API, com forma de pagamento na WABA (templates são cobrados).

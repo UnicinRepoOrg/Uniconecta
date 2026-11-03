@@ -39,8 +39,8 @@ ALLOWED_LIVE = {n for n in (TEST_TO, TEST_TO_2) if n} if LIVE else set()
 FAKE_REQUESTER = TEST_TO_2 or '5531900000001'   # quem pede ajuda (suprimido se não for número de teste)
 SUPERVISOR = '5531900000077'                    # fictício: usuário com is_supervisor no DBBot
 APP_SECRET = 'e2e-app-secret'
-APP_SECRET_PARAM = '/uniconecta/whatsapp-app-secret'   # parâmetro SSM do segredo do app (só o BOT o lê)
-VERIFY_TOKEN = 'e2e-verify-token'
+APP_SECRET_PARAM = '/uniconecta/whatsapp-app-secret'   # parâmetro SSM dos segredos do webhook (só o BOT o lê)
+VERIFY_TOKEN = 'e2e-verify-token'                      # fica no mesmo parâmetro, em JSON com o app secret
 
 # =====================================================================
 #  Stubs: boto3 / botocore (DynamoDB e SSM em memória)
@@ -164,7 +164,7 @@ class FakeResource:
 class FakeSSM:
     def get_parameter(self, Name, WithDecryption=False):
         if Name == APP_SECRET_PARAM:
-            return {'Parameter': {'Value': APP_SECRET}}
+            return {'Parameter': {'Value': json.dumps({'app_secret': APP_SECRET, 'verify_token': VERIFY_TOKEN})}}
         return {'Parameter': {'Value': TOKEN}}
 
 
@@ -272,7 +272,6 @@ COMMON_ENV = {
     'AWS_S3_BUCKET_NAME_0': 'e2e-archive',                   # ligação lambda_check -> bucket do arquivo diário
     'GRAPH_API_URL': ENV.get('GRAPH_API_URL', 'https://graph.facebook.com/v26.0'),
     'WA_PHONE_NUMBER_ID': ENV.get('WA_PHONE_NUMBER_ID', '1413979345131573'),
-    'WA_VERIFY_TOKEN': VERIFY_TOKEN,
 }
 ADMIN_EMAIL, ADMIN_PASSWORD = 'e2e@uniconecta.test', base64.urlsafe_b64encode(os.urandom(12)).decode()
 _salt = os.urandom(16)
@@ -413,6 +412,16 @@ def main():
     resp = bot.lambda_handler({'httpMethod': 'GET', 'queryStringParameters': {
         'hub.mode': 'subscribe', 'hub.verify_token': 'nope', 'hub.challenge': '1'}}, None)
     ok('GET verify with wrong token -> 403', resp['statusCode'] == 403)
+    ok('secrets parameter, previous format: whole value is the app secret, no verify token',
+       bot.parse_webhook_secrets(' abc123 \n') == ('abc123', None, 'text'))
+    ok('secrets parameter, JSON without verify_token: app secret only',
+       bot.parse_webhook_secrets('{"app_secret": "abc123"}') == ('abc123', None, 'json'))
+    try:
+        bot.parse_webhook_secrets('{"app_secret": "s3cr3t-value",')
+        err = None
+    except ValueError as e:
+        err = str(e)
+    ok('secrets parameter, invalid JSON -> error without the value', err and 's3cr3t' not in err, err)
     mark = len(SENT)
     resp = webhook(TEST_TO, text='oi', sign=False)
     ok('POST with bad signature -> 401, nothing sent', resp['statusCode'] == 401 and not sent_since(mark))
