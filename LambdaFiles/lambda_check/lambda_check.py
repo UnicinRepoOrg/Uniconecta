@@ -24,6 +24,7 @@ AWS_REGION = os.environ.get('REGION', 'us-east-1')
 PARAM_NAME_TOKEN = os.environ.get('AWS_SSM_PARAMETER_NAME_0') or os.getenv("AWS_SSM_PARAMETER_TARGET_NAME_0")
 # WhatsApp Business Cloud API (Meta)
 GRAPH_API_URL = os.environ.get('GRAPH_API_URL', 'https://graph.facebook.com/v26.0').rstrip('/')
+# Formato anterior: o phone_number_id do parâmetro do token tem precedência (ver parse_wa_credentials).
 WA_PHONE_NUMBER_ID = os.environ.get('WA_PHONE_NUMBER_ID')
 WA_TEMPLATE_ALERT = os.environ.get('WA_TEMPLATE_ALERT', 'alerta_rede_apoio')
 WA_TEMPLATE_LANG = os.environ.get('WA_TEMPLATE_LANG', 'pt_BR')
@@ -74,7 +75,7 @@ FEEDBACK_PROMPT = (
 FEEDBACK_DELAY_MINUTES = 10
 
 # --- Validações e Clientes Boto3 ---
-if not all([DYNAMODB_USERS_TABLE_NAME, DYNAMODB_REQUESTS_TABLE_NAME, PARAM_NAME_TOKEN, WA_PHONE_NUMBER_ID]):
+if not all([DYNAMODB_USERS_TABLE_NAME, DYNAMODB_REQUESTS_TABLE_NAME, PARAM_NAME_TOKEN]):
     logger.error("CRITICAL ERROR: Essential environment variables not configured.")
     raise ValueError("Incomplete environment configuration.")
 
@@ -85,9 +86,35 @@ requests_table = dynamodb_resource.Table(DYNAMODB_REQUESTS_TABLE_NAME)
 s3 = boto3.client("s3", region_name=AWS_REGION)
 
 # --- Carregar Token do SSM Parameter Store ---
+def parse_wa_credentials(raw):
+    """Lê o valor do parâmetro do token da Meta e devolve (access_token, phone_number_id, formato).
+
+    Formato atual: JSON {"access_token": "...", "phone_number_id": "..."}, um por estágio.
+    Formato anterior: o valor inteiro é o access token, e o Phone Number ID vem de WA_PHONE_NUMBER_ID.
+    Os erros nunca citam o valor, só a posição do problema.
+    """
+    raw = (raw or '').strip()
+    if not raw.startswith('{'):
+        return raw, None, 'text'
+    try:
+        data = json.loads(raw)
+    except ValueError as e:
+        raise ValueError(f"the WhatsApp token parameter is not valid JSON (line {e.lineno}, column {e.colno})") from None
+    access_token = str(data.get('access_token') or '').strip()
+    phone_number_id = str(data.get('phone_number_id') or '').strip() or None
+    return access_token, phone_number_id, 'json'
+
+
 try:
-    response = ssm.get_parameter(Name=PARAM_NAME_TOKEN, WithDecryption=True)
-    TOKEN = response["Parameter"]["Value"]
+    TOKEN, ssm_phone_number_id, token_format = parse_wa_credentials(
+        ssm.get_parameter(Name=PARAM_NAME_TOKEN, WithDecryption=True)["Parameter"]["Value"])
+    if not TOKEN:
+        raise ValueError("the WhatsApp token parameter has no access_token")
+    WA_PHONE_NUMBER_ID = ssm_phone_number_id or WA_PHONE_NUMBER_ID
+    if not WA_PHONE_NUMBER_ID:
+        raise ValueError("no Phone Number ID: write phone_number_id in the WhatsApp token parameter")
+    logger.info(f"Token loaded from SSM Parameter Store ({token_format} format, Phone Number ID "
+                f"{WA_PHONE_NUMBER_ID} from {'the parameter' if ssm_phone_number_id else 'WA_PHONE_NUMBER_ID'}).")
 except Exception as e:
     logger.error(f"CRITICAL ERROR loading token from SSM: {e}")
     raise e

@@ -72,6 +72,7 @@ if PARAM_NAME_TOKEN and PARAM_NAME_TOKEN == CONFIG_PARAM_NAME:
     # O parâmetro de segredos nunca é o token do WhatsApp: o token vai no header Authorization para a Meta.
     PARAM_NAME_TOKEN = None
 GRAPH_API_URL = os.environ.get('GRAPH_API_URL', 'https://graph.facebook.com/v26.0').rstrip('/')
+# Formato anterior: o phone_number_id do parâmetro do token tem precedência (ver parse_wa_credentials).
 WA_PHONE_NUMBER_ID = os.environ.get('WA_PHONE_NUMBER_ID')
 WA_TEMPLATE_WELCOME = os.environ.get('WA_TEMPLATE_WELCOME', 'boas_vindas_aprovado')
 WA_TEMPLATE_LANG = os.environ.get('WA_TEMPLATE_LANG', 'pt_BR')
@@ -206,22 +207,43 @@ def verify_password(password: str, stored: str) -> bool:
 #  Helpers — WhatsApp (template de boas-vindas)
 # =====================================================================
 
-_WA_TOKEN = None
+_WA_CREDENTIALS = None
 
 
-def _wa_token():
-    """Token da Meta lido do SSM só no primeiro uso (o app sobe mesmo sem SSM)."""
-    global _WA_TOKEN
-    if _WA_TOKEN is None:
+def parse_wa_credentials(raw):
+    """Lê o valor do parâmetro do token da Meta e devolve (access_token, phone_number_id, formato).
+
+    Formato atual: JSON {"access_token": "...", "phone_number_id": "..."}, um por estágio.
+    Formato anterior: o valor inteiro é o access token, e o Phone Number ID vem de WA_PHONE_NUMBER_ID.
+    Os erros nunca citam o valor, só a posição do problema.
+    """
+    raw = (raw or '').strip()
+    if not raw.startswith('{'):
+        return raw, None, 'text'
+    try:
+        data = json.loads(raw)
+    except ValueError as e:
+        raise ValueError(f"the WhatsApp token parameter is not valid JSON (line {e.lineno}, column {e.colno})") from None
+    access_token = str(data.get('access_token') or '').strip()
+    phone_number_id = str(data.get('phone_number_id') or '').strip() or None
+    return access_token, phone_number_id, 'json'
+
+
+def _wa_credentials():
+    """(token, Phone Number ID) da Meta, lidos do SSM só no primeiro uso (o app sobe mesmo sem SSM)."""
+    global _WA_CREDENTIALS
+    if _WA_CREDENTIALS is None:
         ssm = boto3.client("ssm", region_name=AWS_REGION)
-        _WA_TOKEN = ssm.get_parameter(Name=PARAM_NAME_TOKEN, WithDecryption=True)["Parameter"]["Value"]
-    return _WA_TOKEN
+        token, phone_number_id, _ = parse_wa_credentials(
+            ssm.get_parameter(Name=PARAM_NAME_TOKEN, WithDecryption=True)["Parameter"]["Value"])
+        _WA_CREDENTIALS = (token, phone_number_id or WA_PHONE_NUMBER_ID)
+    return _WA_CREDENTIALS
 
 
 def send_welcome_template(item):
     """Envia o template de boas-vindas ao voluntário aprovado. Falhas só são logadas."""
-    if not (PARAM_NAME_TOKEN and WA_PHONE_NUMBER_ID):
-        logger.warning("WhatsApp não configurado (AWS_SSM_PARAMETER_NAME_0/WA_PHONE_NUMBER_ID); boas-vindas não enviada.")
+    if not PARAM_NAME_TOKEN:
+        logger.warning("WhatsApp não configurado (AWS_SSM_PARAMETER_NAME_0); boas-vindas não enviada.")
         return False
     to = re.sub(r'\D', '', str(item.get('wa_jid') or item.get('ID') or ''))
     name = re.sub(r'\s+', ' ', str(item.get('nome_preferido') or item.get('nome_completo') or 'voluntário(a)')).strip()
@@ -234,9 +256,14 @@ def send_welcome_template(item):
         ]},
     }
     try:
-        req = urllib.request.Request(f"{GRAPH_API_URL}/{WA_PHONE_NUMBER_ID}/messages",
+        token, phone_number_id = _wa_credentials()
+        if not (token and phone_number_id):
+            logger.warning("WhatsApp não configurado (access_token/phone_number_id no parâmetro do token); "
+                           "boas-vindas não enviada.")
+            return False
+        req = urllib.request.Request(f"{GRAPH_API_URL}/{phone_number_id}/messages",
                                      data=json.dumps(payload).encode('utf-8'), method='POST',
-                                     headers={'Authorization': f"Bearer {_wa_token()}", 'Content-Type': 'application/json'})
+                                     headers={'Authorization': f"Bearer {token}", 'Content-Type': 'application/json'})
         with xray_lite.urlopen(req, timeout=10) as response:
             logger.info(f"Welcome template sent to {to}: {response.status}")
             return True

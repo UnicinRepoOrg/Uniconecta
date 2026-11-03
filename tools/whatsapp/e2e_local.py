@@ -41,6 +41,10 @@ SUPERVISOR = '5531900000077'                    # fictício: usuário com is_sup
 APP_SECRET = 'e2e-app-secret'
 APP_SECRET_PARAM = '/uniconecta/whatsapp-app-secret'   # parâmetro SSM dos segredos do webhook (só o BOT o lê)
 VERIFY_TOKEN = 'e2e-verify-token'                      # fica no mesmo parâmetro, em JSON com o app secret
+PHONE_NUMBER_ID = ENV.get('WA_PHONE_NUMBER_ID', '1413979345131573')   # no parâmetro do token, em JSON
+LEGACY_PHONE_NUMBER_ID = '1000000000000'               # WA_PHONE_NUMBER_ID: só vale com o token em texto
+# Valor do parâmetro do token (AWS_SSM_PARAMETER_NAME_0); o teste do formato anterior troca por texto.
+TOKEN_PARAM = {'value': json.dumps({'access_token': TOKEN, 'phone_number_id': PHONE_NUMBER_ID})}
 
 # =====================================================================
 #  Stubs: boto3 / botocore (DynamoDB e SSM em memória)
@@ -165,7 +169,7 @@ class FakeSSM:
     def get_parameter(self, Name, WithDecryption=False):
         if Name == APP_SECRET_PARAM:
             return {'Parameter': {'Value': json.dumps({'app_secret': APP_SECRET, 'verify_token': VERIFY_TOKEN})}}
-        return {'Parameter': {'Value': TOKEN}}
+        return {'Parameter': {'Value': TOKEN_PARAM['value']}}
 
 
 class FakeS3:
@@ -232,7 +236,7 @@ def _fake_urlopen(req, *args, **kwargs):
     if 'graph.facebook.com' not in req.full_url:
         return _real_urlopen(req, *args, **kwargs)
     payload = json.loads(req.data.decode('utf-8'))
-    rec = {'to': payload.get('to'), 'type': payload.get('type'),
+    rec = {'url': req.full_url, 'to': payload.get('to'), 'type': payload.get('type'),
            'template': payload.get('template', {}).get('name'), 'payload': payload, 'live': False}
     SENT.append(rec)
     if payload.get('to') in ALLOWED_LIVE:
@@ -271,7 +275,7 @@ COMMON_ENV = {
     'AWS_SSM_PARAMETER_NAME_APP_SECRET': APP_SECRET_PARAM,   # ligação BOT -> whatsapp-app-secret, label "app_secret"
     'AWS_S3_BUCKET_NAME_0': 'e2e-archive',                   # ligação lambda_check -> bucket do arquivo diário
     'GRAPH_API_URL': ENV.get('GRAPH_API_URL', 'https://graph.facebook.com/v26.0'),
-    'WA_PHONE_NUMBER_ID': ENV.get('WA_PHONE_NUMBER_ID', '1413979345131573'),
+    'WA_PHONE_NUMBER_ID': LEGACY_PHONE_NUMBER_ID,             # o phone_number_id do parâmetro do token prevalece
 }
 ADMIN_EMAIL, ADMIN_PASSWORD = 'e2e@uniconecta.test', base64.urlsafe_b64encode(os.urandom(12)).decode()
 _salt = os.urandom(16)
@@ -328,7 +332,7 @@ def webhook(from_num, text=None, button_id=None, template_payload=None, wamid=No
     if wamid is None:
         _wamid[0] += 1
         wamid = f"wamid.E2E{_wamid[0]}"
-    value = {'messaging_product': 'whatsapp', 'metadata': {'phone_number_id': COMMON_ENV['WA_PHONE_NUMBER_ID']}}
+    value = {'messaging_product': 'whatsapp', 'metadata': {'phone_number_id': PHONE_NUMBER_ID}}
     if statuses is not None:
         value['statuses'] = statuses
     else:
@@ -396,6 +400,8 @@ def main():
     ok('PATCH approved -> 200', code == 200 and body.get('status') == 'approved')
     ok('welcome template sent to volunteer', any(r['template'] == 'boas_vindas_aprovado' and r['to'] == vid for r in recs), show(recs))
     ok('welcome accepted by Meta', live_ok(recs))
+    ok('welcome sent from the Phone Number ID of the token parameter',
+       recs and all(f"/{PHONE_NUMBER_ID}/messages" in r['url'] for r in recs), show(recs))
     mark = len(SENT)
     api('PATCH', f'/recipients/{vid}', {'status': 'approved'}, token=jwt)
     ok('re-approving does NOT resend welcome', not sent_since(mark))
@@ -436,6 +442,31 @@ def main():
     resp = bot.lambda_handler({'httpMethod': 'POST', 'headers': {'x-hub-signature-256': 'sha256=' + hmac.new(
         APP_SECRET.encode(), raw.encode(), hashlib.sha256).hexdigest()}, 'body': raw}, None)
     ok('POST signed with the SSM secret (lowercase header) -> 200', resp['statusCode'] == 200)
+
+    print("\n2b) Token parameter: access token and Phone Number ID")
+    for label, mod in (('UniconectaApp', app), ('BOT', bot), ('lambda_check', check)):
+        ok(f'{label}: previous format, whole value is the access token, no Phone Number ID',
+           mod.parse_wa_credentials(' tok123 \n') == ('tok123', None, 'text'))
+        ok(f'{label}: JSON with both fields',
+           mod.parse_wa_credentials('{"access_token": "tok123", "phone_number_id": "42"}') == ('tok123', '42', 'json'))
+        ok(f'{label}: JSON without phone_number_id: token only',
+           mod.parse_wa_credentials('{"access_token": "tok123"}') == ('tok123', None, 'json'))
+        try:
+            mod.parse_wa_credentials('{"access_token": "s3cr3t-value",')
+            err = None
+        except ValueError as e:
+            err = str(e)
+        ok(f'{label}: invalid JSON -> error without the value', err and 's3cr3t' not in err, err)
+    ok('BOT and lambda_check read the Phone Number ID from the parameter, not WA_PHONE_NUMBER_ID',
+       bot.WA_PHONE_NUMBER_ID == PHONE_NUMBER_ID and check.WA_PHONE_NUMBER_ID == PHONE_NUMBER_ID,
+       f"{bot.WA_PHONE_NUMBER_ID} / {check.WA_PHONE_NUMBER_ID}")
+    previous_value, previous_cache = TOKEN_PARAM['value'], app._WA_CREDENTIALS
+    TOKEN_PARAM['value'], app._WA_CREDENTIALS = TOKEN, None
+    try:
+        ok('UniconectaApp, token parameter in the previous format: Phone Number ID from WA_PHONE_NUMBER_ID',
+           app._wa_credentials() == (TOKEN, LEGACY_PHONE_NUMBER_ID))
+    finally:
+        TOKEN_PARAM['value'], app._WA_CREDENTIALS = previous_value, previous_cache
 
     print("\n3) Volunteer opens the bot")
     mark = len(SENT)
@@ -516,6 +547,10 @@ def main():
     waves_scenario()
     paging_scenario()
     archive_scenario()
+
+    wrong_number = [r['url'] for r in SENT if f"/{PHONE_NUMBER_ID}/messages" not in r['url']]
+    ok('every Graph call uses the Phone Number ID of the token parameter', not wrong_number,
+       ', '.join(sorted(set(wrong_number))))
 
     failed = [r for r in RESULTS if not r[1]]
     print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} checks passed. "
