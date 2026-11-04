@@ -53,6 +53,12 @@ SEND_CONCURRENCY = int(os.environ.get('SEND_CONCURRENCY', '10'))
 # cada execução; 3 dias deixam cerca de 45 tentativas antes do primeiro pedido do dia expirar.
 REQUEST_TTL_DAYS = int(os.environ.get('REQUEST_TTL_DAYS', '3'))
 
+# --- Aviso de ambiente ---
+# O nome da função é BOT-dev no dev e BOT em produção; o sufixo vem do deploy, então o aviso não
+# depende de variável no canvas e não chega à produção quando o código é promovido.
+IS_DEV_STAGE = os.environ.get('AWS_LAMBDA_FUNCTION_NAME', '').endswith('-dev')
+DEV_MENU_NOTICE = "⚠️ *AMBIENTE DE DESENVOLVIMENTO*\nEste canal é usado apenas para testes.\n\n"
+
 # --- Initial Validations ---
 if (not DYNAMODB_USERS_TABLE_NAME or not DYNAMODB_REQUESTS_TABLE_NAME or not PARAM_NAME_TOKEN
         or not PARAM_NAME_APP_SECRET):
@@ -264,7 +270,8 @@ def send_main_menu_with_buttons(to):
     action = _buttons(("menu_emergency", "🚨 Ajuda Urgente"),
                       ("menu_ride", "🚗 Carona Solidária"),
                       ("menu_chat", "💬 Bate-papo"))
-    return send_interactive_message(to, "button", MESSAGES['menu_body'], action, header_text="UniConecta CCCI")
+    body = (DEV_MENU_NOTICE if IS_DEV_STAGE else "") + MESSAGES['menu_body']
+    return send_interactive_message(to, "button", body, action, header_text="UniConecta CCCI")
 
 def send_alert_template(to, requester_label, alert_label, details, request_id):
     """Alerta para a rede: template UTILITY (entregue mesmo fora da janela de 24h).
