@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { getRecipients, updateRecipient, updateStatus as apiUpdateStatus, deleteRecipient, ApiError } from "@/lib/api";
+import { getRecipients, updateRecipient, updateStatus as apiUpdateStatus, deleteRecipient, checkIcnet, ApiError } from "@/lib/api";
+import { icnetSituation, compareNames, NAME_MATCH_LABEL, formatDateTime } from "@/lib/icnet";
 import { clearToken } from "@/lib/auth";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
@@ -13,7 +14,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from "@/hooks/use-toast";
-import { LogOut, Check, X, Eye, Pencil, Trash2 } from "lucide-react";
+import { LogOut, Check, X, Eye, Pencil, Trash2, RefreshCw } from "lucide-react";
 import type { SupportRecipient } from "@/components/RecipientTable";
 import { EditRecipientDialog } from "@/components/EditRecipientDialog";
 
@@ -26,12 +27,25 @@ const DetailRow = ({ label, value }: { label: string; value: string | null | und
   ) : null
 );
 
+// Situação no ICnet; "· nome diferente" chama a atenção quando o nome devolvido não bate com o do cadastro.
+const IcnetBadge = ({ r }: { r: SupportRecipient }) => {
+  const situation = icnetSituation(r);
+  const match = compareNames(r.nome_completo, r.icnet_nomes);
+  return (
+    <div className="flex flex-col items-start gap-0.5">
+      <Badge variant={situation.variant} className="whitespace-nowrap">{situation.label}</Badge>
+      {match === "diferente" && <span className="text-xs text-destructive">nome diferente</span>}
+    </div>
+  );
+};
+
 const Dashboard = () => {
   const [recipients, setRecipients] = useState<SupportRecipient[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<SupportRecipient | null>(null);
   const [editing, setEditing] = useState<SupportRecipient | null>(null);
   const [deleting, setDeleting] = useState<SupportRecipient | null>(null);
+  const [checkingId, setCheckingId] = useState<string | null>(null);
   const navigate = useNavigate();
   const { toast } = useToast();
 
@@ -82,6 +96,31 @@ const Dashboard = () => {
     }
   };
 
+  const handleIcnetCheck = async (r: SupportRecipient) => {
+    setCheckingId(r.id);
+    try {
+      const updated = await checkIcnet(r.id);
+      setRecipients((list) => list.map((item) => (item.id === updated.id ? updated : item)));
+      setSelected((current) => (current && current.id === updated.id ? updated : current));
+      if (updated.icnet_erro) {
+        toast({ title: "Consulta ao ICnet", description: updated.icnet_erro, variant: "destructive" });
+      } else {
+        toast({ title: "Consulta ao ICnet", description: icnetSituation(updated).label });
+      }
+    } catch (err) {
+      handleApiError(err, "Não foi possível consultar o ICnet.");
+    } finally {
+      setCheckingId(null);
+    }
+  };
+
+  const icnetButton = (r: SupportRecipient) => (
+    <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => handleIcnetCheck(r)}
+      disabled={checkingId === r.id} title="Consultar ICnet">
+      <RefreshCw className={`h-4 w-4 ${checkingId === r.id ? "animate-spin" : ""}`} />
+    </Button>
+  );
+
   const handleDelete = async () => {
     if (!deleting) return;
     const id = deleting.id;
@@ -131,6 +170,7 @@ const Dashboard = () => {
                       <TableHead>Nome</TableHead>
                       <TableHead>WhatsApp</TableHead>
                       <TableHead>IC</TableHead>
+                      <TableHead>ICnet</TableHead>
                       <TableHead>Status</TableHead>
                       <TableHead className="text-right">Ações</TableHead>
                     </TableRow>
@@ -141,6 +181,7 @@ const Dashboard = () => {
                         <TableCell className="font-medium">{r.nome_completo}</TableCell>
                         <TableCell className="text-muted-foreground">{r.whatsapp}</TableCell>
                         <TableCell className="text-muted-foreground">{r.voluntario_ic}</TableCell>
+                        <TableCell><IcnetBadge r={r} /></TableCell>
                         <TableCell>
                           <Badge variant={r.status === "rejected" ? "destructive" : "secondary"}>
                             {r.status === "rejected" ? "Não Aprovado" : "Pendente"}
@@ -154,6 +195,7 @@ const Dashboard = () => {
                             <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => setEditing(r)} title="Editar">
                               <Pencil className="h-4 w-4" />
                             </Button>
+                            {icnetButton(r)}
                             <Button size="icon" variant="ghost" className="h-8 w-8 text-success hover:text-success" onClick={() => updateStatus(r.id, "approved")} title="Aprovar">
                               <Check className="h-4 w-4" />
                             </Button>
@@ -190,6 +232,7 @@ const Dashboard = () => {
                       <TableHead>Nome</TableHead>
                       <TableHead>WhatsApp</TableHead>
                       <TableHead>IC</TableHead>
+                      <TableHead>ICnet</TableHead>
                       <TableHead>Status</TableHead>
                       <TableHead className="text-right">Ações</TableHead>
                     </TableRow>
@@ -200,6 +243,7 @@ const Dashboard = () => {
                         <TableCell className="font-medium">{r.nome_completo}</TableCell>
                         <TableCell className="text-muted-foreground">{r.whatsapp}</TableCell>
                         <TableCell className="text-muted-foreground">{r.voluntario_ic}</TableCell>
+                        <TableCell><IcnetBadge r={r} /></TableCell>
                         <TableCell><Badge variant="default">Aprovado</Badge></TableCell>
                         <TableCell className="text-right">
                           <div className="flex justify-end gap-1">
@@ -209,6 +253,7 @@ const Dashboard = () => {
                             <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => setEditing(r)} title="Editar">
                               <Pencil className="h-4 w-4" />
                             </Button>
+                            {icnetButton(r)}
                             <Button size="icon" variant="ghost" className="h-8 w-8 text-destructive hover:text-destructive" onClick={() => updateStatus(r.id, "rejected")} title="Revogar">
                               <X className="h-4 w-4" />
                             </Button>
@@ -241,6 +286,40 @@ const Dashboard = () => {
                 <DetailRow label="Bairro" value={selected.bairro} />
                 <DetailRow label="WhatsApp" value={selected.whatsapp} />
                 <DetailRow label="Voluntário IC" value={selected.voluntario_ic} />
+                <div className="py-2 border-b border-border/50">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Consulta ao ICnet</span>
+                    <Button size="sm" variant="outline" onClick={() => handleIcnetCheck(selected)} disabled={checkingId === selected.id}>
+                      <RefreshCw className={`h-3.5 w-3.5 mr-1 ${checkingId === selected.id ? "animate-spin" : ""}`} />
+                      Consultar ICnet
+                    </Button>
+                  </div>
+                  <div className="mt-1 space-y-1 text-sm">
+                    <Badge variant={icnetSituation(selected).variant}>{icnetSituation(selected).label}</Badge>
+                    {selected.icnet_consultado_em && (
+                      <>
+                        <p>
+                          <span className="text-muted-foreground">ICs no ICnet: </span>
+                          {selected.icnet_ics && selected.icnet_ics.length > 0
+                            ? selected.icnet_ics.map((ic) => `${ic.sigla} (${ic.ativo ? "ativo" : "inativo"})`).join(", ")
+                            : "nenhuma"}
+                        </p>
+                        <p>
+                          <span className="text-muted-foreground">Nome no ICnet: </span>
+                          {selected.icnet_nomes && selected.icnet_nomes.length > 0
+                            ? `${selected.icnet_nomes.join(" / ")} — ${NAME_MATCH_LABEL[compareNames(selected.nome_completo, selected.icnet_nomes) ?? "diferente"]}`
+                            : "não informado pelo ICnet"}
+                        </p>
+                        <p className="text-xs text-muted-foreground">Consultado em {formatDateTime(selected.icnet_consultado_em)}</p>
+                      </>
+                    )}
+                    {selected.icnet_erro && (
+                      <p className="text-xs text-destructive">
+                        {selected.icnet_erro} ({formatDateTime(selected.icnet_erro_em)})
+                      </p>
+                    )}
+                  </div>
+                </div>
                 <DetailRow label="Mora sozinho" value={selected.mora_sozinho ? "Sim" : "Não"} />
                 <DetailRow label="Plano de Saúde" value={selected.plano_saude} />
                 <DetailRow label="Hospital de preferência" value={selected.hospital_preferencia} />

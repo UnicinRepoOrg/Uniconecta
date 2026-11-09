@@ -35,6 +35,14 @@ export type SupportRecipient = {
   alergia_intolerancia: string | null;
   tipo_sanguineo: string | null;
   medicacao_continua: string | null;
+  // Consulta ao ICnet (gravada pelo backend; ausente em cadastros nunca consultados).
+  icnet_voluntario?: boolean;
+  icnet_ativo?: boolean;
+  icnet_ics?: { sigla: string; ativo: boolean }[];
+  icnet_nomes?: string[];
+  icnet_consultado_em?: string | null;
+  icnet_erro?: string | null;
+  icnet_erro_em?: string | null;
 };
 
 type Props = {
