@@ -77,6 +77,13 @@ WA_PHONE_NUMBER_ID = os.environ.get('WA_PHONE_NUMBER_ID')
 WA_TEMPLATE_WELCOME = os.environ.get('WA_TEMPLATE_WELCOME', 'boas_vindas_aprovado')
 WA_TEMPLATE_LANG = os.environ.get('WA_TEMPLATE_LANG', 'pt_BR')
 
+# --- ICnet: consulta de voluntário pelo telefone ---
+# Informativa: o resultado vai para o cadastro e o painel o mostra ao administrador; nunca bloqueia nada.
+# O token fica na chave ICNET_API_TOKEN do parâmetro de segredos (o mesmo do JWT_SECRET).
+ICNET_API_URL = os.environ.get('ICNET_API_URL',
+                               'https://icnetapi2.conscienciologia.org.br/api/v1/voluntarios/consulta')
+ICNET_TIMEOUT_SECONDS = float(os.environ.get('ICNET_TIMEOUT_SECONDS', '5'))
+
 # --- Admins (multi-admin) ---
 # ADMINS_JSON = lista [{"email","hash"}]; mesclado com o admin único (fallback).
 ADMINS = {}
@@ -275,6 +282,67 @@ def send_welcome_template(item):
 
 
 # =====================================================================
+#  Helpers — ICnet (consulta de voluntário)
+# =====================================================================
+
+ICNET_HTTP_ERRORS = {
+    400: 'O ICnet recusou o telefone (sem DDD ou inválido).',
+    401: 'O ICnet recusou o token da consulta.',
+}
+
+
+def _icnet_names(data):
+    """Nome(s) da pessoa no ICnet. A v1 da API não devolve nome; aceita 'nome' (texto) ou 'nomes' (lista)."""
+    raw = data.get('nomes')
+    if not isinstance(raw, list):
+        raw = [data.get('nome')]
+    names = []
+    for value in raw:
+        name = re.sub(r'\s+', ' ', str(value or '')).strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def consultar_icnet(phone):
+    """Consulta o ICnet e devolve os campos icnet_* a gravar no cadastro. Nunca levanta exceção.
+
+    Sucesso: icnet_voluntario, icnet_ativo, icnet_ics, icnet_nomes e icnet_consultado_em; icnet_erro volta a None.
+    Falha: só icnet_erro e icnet_erro_em, para não apagar o resultado de uma consulta anterior.
+    """
+    token = _cfg('ICNET_API_TOKEN')
+    if not token:
+        return {'icnet_erro': 'Consulta ao ICnet não configurada (ICNET_API_TOKEN).', 'icnet_erro_em': now_iso()}
+    req = urllib.request.Request(ICNET_API_URL, data=json.dumps({'telefone': phone}).encode('utf-8'), method='POST',
+                                 headers={'Authorization': f"Bearer {token}", 'Content-Type': 'application/json'})
+    try:
+        with xray_lite.urlopen(req, timeout=ICNET_TIMEOUT_SECONDS) as response:
+            data = json.loads(response.read().decode('utf-8'))
+        if not isinstance(data, dict):
+            raise ValueError('a resposta não é um objeto JSON')
+    except urllib.error.HTTPError as e:
+        logger.error(f"ICnet query failed: HTTP {e.code}")
+        return {'icnet_erro': ICNET_HTTP_ERRORS.get(e.code, f'O ICnet respondeu com erro {e.code}.'),
+                'icnet_erro_em': now_iso()}
+    except Exception as e:
+        logger.error(f"ICnet query failed: {e}")
+        return {'icnet_erro': 'O ICnet não respondeu.', 'icnet_erro_em': now_iso()}
+
+    ics = []
+    for ic in data.get('ics') or []:
+        if isinstance(ic, dict) and str(ic.get('sigla') or '').strip():
+            ics.append({'sigla': str(ic['sigla']).strip(), 'ativo': bool(ic.get('ativo'))})
+    return {
+        'icnet_voluntario': bool(data.get('voluntario')),
+        'icnet_ativo': bool(data.get('ativo')),
+        'icnet_ics': ics,
+        'icnet_nomes': _icnet_names(data),
+        'icnet_consultado_em': now_iso(),
+        'icnet_erro': None,
+    }
+
+
+# =====================================================================
 #  Helpers — HTTP (JSON)
 # =====================================================================
 
@@ -424,6 +492,9 @@ def handle_cadastro(event):
         value = data.get(field)
         item[field] = str(value).strip() if value not in (None, '') else None
 
+    # Até ICNET_TIMEOUT_SECONDS a mais no envio; se o ICnet falhar, o cadastro é salvo com icnet_erro.
+    item.update(consultar_icnet(phone_id))
+
     try:
         users_table.put_item(Item=item)
     except Exception as e:
@@ -525,6 +596,13 @@ def handle_patch_status(event, recipient_id):
     return respond(200, item_to_response(updated))
 
 
+def handle_icnet_check(event, recipient_id):
+    """Refaz a consulta ao ICnet de um cadastro (cadastros antigos, falhas, conferência antes de aprovar)."""
+    if not users_table.get_item(Key={'ID': recipient_id}).get('Item'):
+        return error(404, "Cadastro não encontrado.")
+    return respond(200, item_to_response(_apply_update(recipient_id, consultar_icnet(recipient_id))))
+
+
 def handle_delete_recipient(event, recipient_id):
     if not users_table.get_item(Key={'ID': recipient_id}).get('Item'):
         return error(404, "Cadastro não encontrado.")
@@ -569,12 +647,15 @@ def lambda_handler(event, context):
 
         # Rotas admin (Bearer)
         recipient_match = re.match(r'^/recipients/([^/]+)$', path)
-        needs_auth = (path == '/recipients') or bool(recipient_match)
+        icnet_match = re.match(r'^/recipients/([^/]+)/icnet$', path)
+        needs_auth = (path == '/recipients') or bool(recipient_match) or bool(icnet_match)
         if needs_auth and not get_auth_payload(event):
             return error(401, "Não autorizado.")
 
         if method == 'GET' and path == '/recipients':
             return handle_list_recipients(event)
+        if icnet_match and method == 'POST':
+            return handle_icnet_check(event, icnet_match.group(1))
         if recipient_match:
             rid = recipient_match.group(1)
             if method == 'PUT':

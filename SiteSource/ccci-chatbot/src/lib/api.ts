@@ -58,6 +58,10 @@ export const updateRecipient = (id: string, data: Partial<SupportRecipient>) =>
 export const updateStatus = (id: string, status: string) =>
   request<SupportRecipient>(`/recipients/${id}`, { method: "PATCH", body: { status }, auth: true });
 
+// Refaz a consulta ao ICnet e devolve o cadastro com o resultado gravado.
+export const checkIcnet = (id: string) =>
+  request<SupportRecipient>(`/recipients/${id}/icnet`, { method: "POST", auth: true });
+
 export const deleteRecipient = (id: string) =>
   request<{ ok: boolean }>(`/recipients/${id}`, { method: "DELETE", auth: true });
 
