@@ -82,7 +82,10 @@ WA_TEMPLATE_LANG = os.environ.get('WA_TEMPLATE_LANG', 'pt_BR')
 # O token fica na chave ICNET_API_TOKEN do parâmetro de segredos (o mesmo do JWT_SECRET).
 ICNET_API_URL = os.environ.get('ICNET_API_URL',
                                'https://icnetapi2.conscienciologia.org.br/api/v1/voluntarios/consulta')
-ICNET_TIMEOUT_SECONDS = float(os.environ.get('ICNET_TIMEOUT_SECONDS', '5'))
+# Espera máxima pela resposta do ICnet. O teto é o API Gateway, que encerra a requisição em 29 s, e a
+# função tem 30 s: com a espera acima de ~25 s, o formulário recebe erro e o cadastro pode nem ser salvo.
+# Com 5 s, o ICnet passou do tempo no dev em 10/11/2026 (5,1 s); outra consulta no mesmo dia levou 2,7 s.
+ICNET_TIMEOUT_SECONDS = float(os.environ.get('ICNET_TIMEOUT_SECONDS', '25'))
 
 # --- Admins (multi-admin) ---
 # ADMINS_JSON = lista [{"email","hash"}]; mesclado com o admin único (fallback).
