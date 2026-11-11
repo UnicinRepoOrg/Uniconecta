@@ -9,7 +9,7 @@ import base64
 import hashlib
 import logging
 import urllib.request
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from boto3.dynamodb.conditions import Key
 
 # --- Logger Configuration ---
@@ -113,16 +113,32 @@ dynamodb_resource = boto3.resource("dynamodb", region_name=AWS_REGION, endpoint_
 users_table = dynamodb_resource.Table(DYNAMODB_USERS_TABLE_NAME)
 
 # --- Campos do cadastro ---
+# As perguntas e os valores permitidos estão também em SiteSource/ccci-chatbot/src/lib/cadastroCampos.ts:
+# uma mudança aqui precisa ser repetida lá.
 REQUIRED_FIELDS = [
-    'nome_completo', 'idade', 'endereco', 'bairro', 'whatsapp',
+    'nome_completo', 'nome_preferido', 'data_nascimento', 'endereco', 'bairro', 'whatsapp',
     'voluntario_ic', 'contato_familia', 'contato_ccci',
 ]
 OPTIONAL_TEXT_FIELDS = [
     'plano_saude', 'hospital_preferencia', 'tem_pet', 'cadastro_ubs',
     'pessoa_chaves', 'profissional_saude', 'alergia_intolerancia',
-    'tipo_sanguineo', 'medicacao_continua',
+    'tipo_sanguineo', 'medicacao_continua', 'condominio', 'carona_regiao', 'carona_disponibilidade',
 ]
-EDITABLE_FIELDS = REQUIRED_FIELDS + OPTIONAL_TEXT_FIELDS + ['mora_sozinho', 'cep']
+# Campos de escolha: só os valores listados. carona_disponibilidade é uma opção; os outros, várias.
+CHOICE_FIELDS = {'carona_disponibilidade': ('regular', 'eventual')}
+MULTI_CHOICE_FIELDS = {
+    'carona_dias': ('seg', 'ter', 'qua', 'qui', 'sex', 'sab', 'dom'),
+    'carona_periodo': ('manha', 'tarde', 'noite'),
+}
+# Dados de carona, apagados quando possui_carro é False.
+CARONA_FIELDS = ('carona_disponibilidade', 'carona_regiao', 'carona_dias', 'carona_periodo')
+VINCULOS = ('familiar', 'companheiro', 'outra')
+MAX_PESSOAS_VINCULADAS = 10
+# Cadastros antigos têm só a idade; idade continua editável e é recalculada quando há data_nascimento.
+# termo_aceito_em fica de fora: só a API grava, no cadastro.
+EDITABLE_FIELDS = (REQUIRED_FIELDS + OPTIONAL_TEXT_FIELDS
+                   + ['idade', 'mora_sozinho', 'cep', 'possui_carro', 'pessoas_vinculadas']
+                   + list(MULTI_CHOICE_FIELDS))
 INTERNAL_FIELDS = {'ID', 'conversation_state', 'state_last_updated', 'lista_contatos'}
 
 
@@ -149,6 +165,144 @@ def canonical_cep(raw):
     O BOT usa o CEP para avisar primeiro os voluntários mais próximos."""
     digits = re.sub(r'\D', '', str(raw or ''))
     return digits if len(digits) == 8 else None
+
+
+# =====================================================================
+#  Helpers — campos novos do cadastro (data de nascimento, listas, pessoas vinculadas)
+# =====================================================================
+
+# Brasília (UTC-3, sem horário de verão desde 2019): a idade vira no dia do aniversário no Brasil.
+BRT = timezone(timedelta(hours=-3))
+
+
+class FieldError(ValueError):
+    """Valor inválido em um campo do cadastro; a mensagem vai para o formulário."""
+
+
+def today_brt():
+    return datetime.now(BRT).date()
+
+
+def parse_birth_date(raw):
+    """'AAAA-MM-DD' -> date. Levanta FieldError se for inválida, futura ou anterior a 1900."""
+    try:
+        born = date.fromisoformat(str(raw or '').strip())
+    except ValueError:
+        raise FieldError("Data de nascimento inválida (use AAAA-MM-DD).") from None
+    if born > today_brt() or born.year < 1900:
+        raise FieldError("Data de nascimento inválida.")
+    return born
+
+
+def age_from_birth(born, today=None):
+    today = today or today_brt()
+    return today.year - born.year - ((today.month, today.day) < (born.month, born.day))
+
+
+def valid_contact_phone(raw):
+    """Telefone de uma pessoa vinculada: canonical_phone com 10 a 15 dígitos, senão None."""
+    phone = canonical_phone(raw)
+    return phone if phone and 10 <= len(phone) <= 15 else None
+
+
+def parse_bool(field, value):
+    """True/False/None; aceita também 'sim'/'nao' e 'true'/'false'."""
+    if value is None or value == '':
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ('sim', 'true', '1'):
+        return True
+    if text in ('nao', 'não', 'false', '0'):
+        return False
+    raise FieldError(f"Campo '{field}' deve ser Sim ou Não.")
+
+
+def parse_choice(field, value):
+    if value in (None, ''):
+        return None
+    text = str(value).strip()
+    if text not in CHOICE_FIELDS[field]:
+        raise FieldError(f"Valor inválido em '{field}'.")
+    return text
+
+
+def parse_multi_choice(field, value):
+    """Lista só com os valores permitidos, sem repetição, na ordem da lista permitida."""
+    if value in (None, ''):
+        return []
+    if not isinstance(value, list):
+        raise FieldError(f"Campo '{field}' deve ser uma lista.")
+    allowed = MULTI_CHOICE_FIELDS[field]
+    chosen = {str(v).strip() for v in value}
+    if not chosen <= set(allowed):
+        raise FieldError(f"Valor inválido em '{field}'.")
+    return [v for v in allowed if v in chosen]
+
+
+def parse_pessoas_vinculadas(value):
+    """Lista de {nome, telefone, vinculo}. [] = respondeu "Não"; None = não respondeu (cadastros antigos)."""
+    if value is None:
+        return None
+    if not isinstance(value, list) or len(value) > MAX_PESSOAS_VINCULADAS:
+        raise FieldError("Pessoas que residem com você: lista inválida.")
+    pessoas = []
+    for i, pessoa in enumerate(value, start=1):
+        if not isinstance(pessoa, dict):
+            raise FieldError("Pessoas que residem com você: lista inválida.")
+        nome = re.sub(r'\s+', ' ', str(pessoa.get('nome') or '')).strip()[:200]
+        telefone = valid_contact_phone(pessoa.get('telefone'))
+        vinculo = str(pessoa.get('vinculo') or '').strip()
+        if not nome:
+            raise FieldError(f"Informe o nome da pessoa {i} que reside com você.")
+        if not telefone:
+            raise FieldError(f"Telefone inválido da pessoa {i} que reside com você.")
+        if vinculo not in VINCULOS:
+            raise FieldError(f"Grau de vínculo inválido da pessoa {i} que reside com você.")
+        pessoas.append({'nome': nome, 'telefone': telefone, 'vinculo': vinculo})
+    return pessoas
+
+
+def parse_field(field, value):
+    """Valor de um campo editável já validado e normalizado. Levanta FieldError."""
+    if field == 'data_nascimento':
+        return parse_birth_date(value).isoformat() if value not in (None, '') else None
+    if field == 'idade':
+        if value in (None, ''):
+            return None
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            raise FieldError("Campo 'idade' deve ser um número.") from None
+    if field == 'mora_sozinho':
+        return bool(parse_bool(field, value))
+    if field == 'possui_carro':
+        return parse_bool(field, value)
+    if field == 'cep':
+        if value in (None, ''):
+            return None
+        cep = canonical_cep(value)
+        if not cep:
+            raise FieldError("CEP inválido (8 dígitos).")
+        return cep
+    if field == 'pessoas_vinculadas':
+        return parse_pessoas_vinculadas(value)
+    if field in CHOICE_FIELDS:
+        return parse_choice(field, value)
+    if field in MULTI_CHOICE_FIELDS:
+        return parse_multi_choice(field, value)
+    return str(value).strip() if value not in (None, '') else None
+
+
+def apply_derived_fields(fields):
+    """Idade a partir da data de nascimento e dados de carona apagados quando não há carro."""
+    if fields.get('data_nascimento'):
+        fields['idade'] = age_from_birth(date.fromisoformat(fields['data_nascimento']))
+    if fields.get('possui_carro') is False:
+        for field in CARONA_FIELDS:
+            fields[field] = [] if field in MULTI_CHOICE_FIELDS else None
+    return fields
 
 
 def extract_contact_numbers(*free_text_fields):
@@ -404,6 +558,12 @@ def item_to_response(item):
         if key in INTERNAL_FIELDS:
             continue
         result[key] = int(value) if key == 'idade' and value is not None else value
+    # Com a data de nascimento, a idade é recalculada a cada leitura e fica sempre atualizada.
+    if item.get('data_nascimento'):
+        try:
+            result['idade'] = age_from_birth(date.fromisoformat(str(item['data_nascimento'])))
+        except ValueError:
+            pass
     return result
 
 
@@ -448,25 +608,25 @@ def handle_cadastro(event):
     except Exception:
         return error(400, "Corpo inválido (JSON esperado).")
 
-    missing = [f for f in REQUIRED_FIELDS if not str(data.get(f, '')).strip()]
+    missing = [f for f in REQUIRED_FIELDS if not str(data.get(f) or '').strip()]
     if missing:
         return error(400, f"Campos obrigatórios ausentes: {', '.join(missing)}")
-
-    try:
-        idade = int(data['idade'])
-    except (ValueError, TypeError):
-        return error(400, "Campo 'idade' deve ser um número.")
+    if data.get('termo_aceito') is not True:
+        return error(400, "É preciso aceitar a Declaração de Ciência e Compromisso.")
 
     phone_id = canonical_phone(data['whatsapp'])
     if not phone_id:
         return error(400, "Número de WhatsApp inválido.")
 
-    # CEP é opcional na API (cadastros antigos não têm); se vier, precisa ser válido.
-    cep = None
-    if str(data.get('cep') or '').strip():
-        cep = canonical_cep(data['cep'])
-        if not cep:
-            return error(400, "CEP inválido (8 dígitos).")
+    # CEP, pessoas vinculadas e carro são opcionais na API (o site pede); se vierem, precisam ser válidos.
+    fields = {}
+    try:
+        for field in EDITABLE_FIELDS:
+            if field != 'idade':
+                fields[field] = parse_field(field, data.get(field))
+    except FieldError as e:
+        return error(400, str(e))
+    apply_derived_fields(fields)
 
     if users_table.get_item(Key={'ID': phone_id}).get('Item'):
         return error(409, "Já existe um cadastro com este número de WhatsApp.")
@@ -477,23 +637,12 @@ def handle_cadastro(event):
         'status': 'pending',
         'created_at': timestamp,
         'updated_at': timestamp,
-        'nome_completo': str(data['nome_completo']).strip(),
-        'idade': idade,
-        'endereco': str(data['endereco']).strip(),
-        'bairro': str(data['bairro']).strip(),
-        'cep': cep,
-        'whatsapp': str(data['whatsapp']).strip(),
-        'voluntario_ic': str(data['voluntario_ic']).strip(),
-        'mora_sozinho': bool(data.get('mora_sozinho', False)),
-        'contato_familia': str(data['contato_familia']).strip(),
-        'contato_ccci': str(data['contato_ccci']).strip(),
+        **fields,
+        'termo_aceito_em': timestamp,
         'conversation_state': 'initial',
         'state_last_updated': timestamp,
         'lista_contatos': extract_contact_numbers(data.get('contato_familia'), data.get('contato_ccci')),
     }
-    for field in OPTIONAL_TEXT_FIELDS:
-        value = data.get(field)
-        item[field] = str(value).strip() if value not in (None, '') else None
 
     # Até ICNET_TIMEOUT_SECONDS a mais no envio; se o ICnet falhar, o cadastro é salvo com icnet_erro.
     item.update(consultar_icnet(phone_id))
@@ -555,26 +704,13 @@ def handle_update_recipient(event, recipient_id):
         return error(400, "Corpo inválido (JSON esperado).")
 
     updates = {}
-    for field in EDITABLE_FIELDS:
-        if field not in data:
-            continue
-        value = data[field]
-        if field == 'idade':
-            try:
-                updates[field] = int(value)
-            except (ValueError, TypeError):
-                return error(400, "Campo 'idade' deve ser um número.")
-        elif field == 'mora_sozinho':
-            updates[field] = bool(value)
-        elif field == 'cep':
-            if value in (None, ''):
-                updates[field] = None
-            elif not canonical_cep(value):
-                return error(400, "CEP inválido (8 dígitos).")
-            else:
-                updates[field] = canonical_cep(value)
-        else:
-            updates[field] = str(value).strip() if value not in (None, '') else None
+    try:
+        for field in EDITABLE_FIELDS:
+            if field in data:
+                updates[field] = parse_field(field, data[field])
+    except FieldError as e:
+        return error(400, str(e))
+    apply_derived_fields(updates)
 
     if not updates:
         return error(400, "Nenhum campo editável informado.")

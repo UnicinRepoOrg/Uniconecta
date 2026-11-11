@@ -380,20 +380,54 @@ def main():
     ok('login -> 200 + JWT', code == 200 and jwt)
     code, _ = api('GET', '/recipients')
     ok('GET /recipients without token -> 401', code == 401)
-    code, body = api('POST', '/cadastro', {'nome_completo': 'X', 'idade': 40, 'endereco': 'Rua A, 1', 'bairro': 'Centro',
-                                           'whatsapp': '31900000055', 'voluntario_ic': 'Sim', 'contato_familia': 'Ana',
-                                           'contato_ccci': 'CCCI', 'cep': '3014-007'})
+    base = {'nome_completo': 'X', 'nome_preferido': 'X', 'data_nascimento': '1986-03-15', 'endereco': 'Rua A, 1',
+            'bairro': 'Centro', 'whatsapp': '31900000055', 'voluntario_ic': 'Sim', 'contato_familia': 'Ana',
+            'contato_ccci': 'CCCI', 'termo_aceito': True}
+    code, body = api('POST', '/cadastro', {**base, 'cep': '3014-007'})
     ok('POST /cadastro with invalid CEP -> 400', code == 400, json.dumps(body, ensure_ascii=False))
-    cadastro = {'nome_completo': 'Teste E2E', 'idade': 40, 'endereco': 'Rua A, 1', 'bairro': 'Centro', 'cep': '30140-071',
+    code, body = api('POST', '/cadastro', {**base, 'termo_aceito': False})
+    ok('POST /cadastro without the declaration -> 400', code == 400, json.dumps(body, ensure_ascii=False))
+    code, body = api('POST', '/cadastro', {k: v for k, v in base.items() if k != 'nome_preferido'})
+    ok('POST /cadastro without nome_preferido -> 400', code == 400 and 'nome_preferido' in body.get('error', ''))
+    code, body = api('POST', '/cadastro', {**base, 'data_nascimento': '2999-01-01'})
+    ok('POST /cadastro with a future birth date -> 400', code == 400, json.dumps(body, ensure_ascii=False))
+    code, body = api('POST', '/cadastro', {**base, 'carona_dias': ['seg', 'feriado']})
+    ok('POST /cadastro with an unknown weekday -> 400', code == 400, json.dumps(body, ensure_ascii=False))
+    code, body = api('POST', '/cadastro', {**base, 'pessoas_vinculadas': [{'nome': 'Ana', 'telefone': '123', 'vinculo': 'familiar'}]})
+    ok('POST /cadastro with an invalid linked-person phone -> 400', code == 400, json.dumps(body, ensure_ascii=False))
+    ok('rejected cadastros are not stored', '5531900000055' not in USERS)
+    cadastro = {'nome_completo': 'Teste E2E', 'nome_preferido': 'Teste', 'data_nascimento': '1986-03-15', 'idade': 1,
+                'endereco': 'Rua A, 1', 'bairro': 'Cognópolis', 'condominio': 'Campos dos Sonhos', 'cep': '30140-071',
                 'whatsapp': TEST_TO[2:] if TEST_TO.startswith('55') else TEST_TO,
-                'voluntario_ic': 'Sim', 'contato_familia': 'Ana 31 98888-7777', 'contato_ccci': 'CCCI'}
+                'voluntario_ic': 'Sim', 'mora_sozinho': False, 'contato_familia': 'Ana 31 98888-7777', 'contato_ccci': 'CCCI',
+                'pessoas_vinculadas': [{'nome': 'Ana', 'telefone': '(31) 98888-7777', 'vinculo': 'familiar'}],
+                'possui_carro': True, 'carona_disponibilidade': 'regular', 'carona_regiao': 'Centro',
+                'carona_dias': ['sex', 'seg'], 'carona_periodo': ['noite'], 'termo_aceito': True}
     code, body = api('POST', '/cadastro', cadastro)
     ok('POST /cadastro -> 201 pending', code == 201 and body.get('status') == 'pending', json.dumps(body))
     vid = body.get('id')
     ok('canonical ID equals TEST_TO', vid == TEST_TO, f"{vid} vs {TEST_TO}")
-    ok('CEP stored as 8 digits', USERS.get(vid, {}).get('cep') == '30140071', str(USERS.get(vid, {}).get('cep')))
+    stored = USERS.get(vid, {})
+    ok('CEP stored as 8 digits', stored.get('cep') == '30140071', str(stored.get('cep')))
+    expected_age = app.age_from_birth(app.date(1986, 3, 15))
+    ok('idade derived from data_nascimento (the sent idade is ignored)', stored.get('idade') == expected_age, str(stored.get('idade')))
+    ok('termo_aceito_em recorded', bool(stored.get('termo_aceito_em')))
+    ok('possui_carro stored as boolean, weekdays in order',
+       stored.get('possui_carro') is True and stored.get('carona_dias') == ['seg', 'sex'], str(stored.get('carona_dias')))
+    ok('linked person phone canonical',
+       stored.get('pessoas_vinculadas') == [{'nome': 'Ana', 'telefone': '5531988887777', 'vinculo': 'familiar'}],
+       str(stored.get('pessoas_vinculadas')))
     code, body = api('GET', '/recipients', token=jwt)
     ok('GET /recipients -> lists the new cadastro', code == 200 and any(r['id'] == vid for r in body['recipients']))
+    code, body = api('PUT', f'/recipients/{vid}', {'data_nascimento': '2999-01-01'}, token=jwt)
+    ok('PUT with a future birth date -> 400', code == 400, json.dumps(body, ensure_ascii=False))
+    code, body = api('PUT', f'/recipients/{vid}', {'possui_carro': False}, token=jwt)
+    ok('PUT possui_carro=False clears the ride details',
+       code == 200 and body.get('carona_dias') == [] and body.get('carona_disponibilidade') is None, json.dumps(body, ensure_ascii=False))
+    api('PUT', f'/recipients/{vid}', {'possui_carro': True}, token=jwt)
+    legacy = app.item_to_response({'ID': '1', 'idade': 50, 'data_nascimento': '1960-01-01'})
+    ok('item_to_response recomputes idade from data_nascimento', legacy['idade'] == app.age_from_birth(app.date(1960, 1, 1)))
+    ok('item_to_response keeps idade of old records without a date', app.item_to_response({'ID': '1', 'idade': 50})['idade'] == 50)
     mark = len(SENT)
     code, body = api('PATCH', f'/recipients/{vid}', {'status': 'approved'}, token=jwt)
     recs = sent_since(mark)

@@ -10,6 +10,8 @@ import {
 import { Check, X, Trash2, Eye } from "lucide-react";
 import { useState } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { CadastroDetalhe } from "@/components/CadastroDetalhe";
+import type { PessoaVinculada } from "@/lib/api";
 
 export type SupportRecipient = {
   id: string;
@@ -17,13 +19,26 @@ export type SupportRecipient = {
   updated_at: string;
   status: string;
   nome_completo: string;
+  // Obrigatório desde o cadastro de 11/2026; cadastros antigos podem não ter.
   nome_preferido: string | null;
-  idade: number;
+  // "AAAA-MM-DD". Cadastros antigos têm só a idade; com a data, a API recalcula a idade a cada leitura.
+  data_nascimento?: string | null;
+  idade: number | null;
   endereco: string;
   bairro: string;
+  condominio?: string | null;
+  cep?: string | null;
   whatsapp: string;
   voluntario_ic: string;
   mora_sozinho: boolean;
+  // Lista vazia = respondeu "Não"; ausente/null = não respondeu (cadastros antigos).
+  pessoas_vinculadas?: PessoaVinculada[] | null;
+  // O BOT usa possui_carro para avisar primeiro quem tem carro nos pedidos de carona.
+  possui_carro?: boolean | null;
+  carona_disponibilidade?: string | null;
+  carona_regiao?: string | null;
+  carona_dias?: string[];
+  carona_periodo?: string[];
   plano_saude: string | null;
   hospital_preferencia: string | null;
   tem_pet: string | null;
@@ -35,6 +50,8 @@ export type SupportRecipient = {
   alergia_intolerancia: string | null;
   tipo_sanguineo: string | null;
   medicacao_continua: string | null;
+  // Data/hora em que a Declaração de Ciência e Compromisso foi aceita (gravada pela API).
+  termo_aceito_em?: string | null;
   // Consulta ao ICnet (gravada pelo backend; ausente em cadastros nunca consultados).
   icnet_voluntario?: boolean;
   icnet_ativo?: boolean;
@@ -62,15 +79,6 @@ const statusBadge = (status: string) => {
   const s = map[status] || { label: status, variant: "outline" as const };
   return <Badge variant={s.variant}>{s.label}</Badge>;
 };
-
-const DetailRow = ({ label, value }: { label: string; value: string | null | undefined }) => (
-  value ? (
-    <div className="py-2 border-b border-border/50 last:border-0">
-      <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">{label}</span>
-      <p className="text-sm text-foreground mt-0.5 whitespace-pre-wrap">{value}</p>
-    </div>
-  ) : null
-);
 
 export const RecipientTable = ({ recipients, loading, onApprove, onReject, onDelete }: Props) => {
   const [selected, setSelected] = useState<SupportRecipient | null>(null);
@@ -141,26 +149,7 @@ export const RecipientTable = ({ recipients, loading, onApprove, onReject, onDel
           </DialogHeader>
           {selected && (
             <ScrollArea className="max-h-[65vh] pr-4">
-              <div className="space-y-1">
-                <DetailRow label="Como prefere ser chamado(a)" value={selected.nome_preferido} />
-                <DetailRow label="Idade" value={String(selected.idade)} />
-                <DetailRow label="Endereço" value={selected.endereco} />
-                <DetailRow label="Bairro" value={selected.bairro} />
-                <DetailRow label="WhatsApp" value={selected.whatsapp} />
-                <DetailRow label="Voluntário IC" value={selected.voluntario_ic} />
-                <DetailRow label="Mora sozinho" value={selected.mora_sozinho ? "Sim" : "Não"} />
-                <DetailRow label="Plano de Saúde" value={selected.plano_saude} />
-                <DetailRow label="Hospital de preferência" value={selected.hospital_preferencia} />
-                <DetailRow label="Cadastro UBS" value={selected.cadastro_ubs} />
-                <DetailRow label="Profissional de Saúde" value={selected.profissional_saude} />
-                <DetailRow label="Alergias / Intolerâncias" value={selected.alergia_intolerancia} />
-                <DetailRow label="Tipo Sanguíneo" value={selected.tipo_sanguineo} />
-                <DetailRow label="Medicação Contínua" value={selected.medicacao_continua} />
-                <DetailRow label="Pet" value={selected.tem_pet} />
-                <DetailRow label="Contato Familiar" value={selected.contato_familia} />
-                <DetailRow label="Contato CCCI" value={selected.contato_ccci} />
-                <DetailRow label="Pessoa com chaves" value={selected.pessoa_chaves} />
-              </div>
+              <CadastroDetalhe recipient={selected} />
             </ScrollArea>
           )}
         </DialogContent>
