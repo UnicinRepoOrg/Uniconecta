@@ -47,21 +47,27 @@ def proximity_level(requester, member):
     return 4
 
 
-def build_waves(requester, members, min_size=10, broadcast=False):
+def build_waves(requester, members, min_size=10, broadcast=False, prefer=None):
     """Divide a rede em ondas. `members` são dicts com 'id', 'to', 'cep', 'bairro'.
-    Devolve [[{'id', 'to'}, ...], ...]; com broadcast=True, uma onda só."""
+    Devolve [[{'id', 'to'}, ...], ...]; com broadcast=True, uma onda só.
+
+    `prefer(member)` verdadeiro põe o membro à frente de todos os outros (usado na carona:
+    quem tem carro). Os preferidos seguem os níveis 0-4 entre si, e os demais vêm depois,
+    também do mais próximo ao mais longe. Ninguém fica de fora."""
     recipients = [(m, {'id': m['id'], 'to': m['to']}) for m in members]
     if broadcast:
         return [[r for _, r in recipients]] if recipients else []
 
-    by_level = [[] for _ in range(LEVELS)]
+    groups = 2 if prefer else 1
+    by_level = [[] for _ in range(LEVELS * groups)]
     for member, recipient in recipients:
-        by_level[proximity_level(requester, member)].append(recipient)
+        offset = LEVELS if prefer and not prefer(member) else 0
+        by_level[offset + proximity_level(requester, member)].append(recipient)
 
     waves, current = [], []
     for level, group in enumerate(by_level):
         current += group
-        if current and (len(current) >= min_size or level == LEVELS - 1):
+        if current and (len(current) >= min_size or level == len(by_level) - 1):
             waves.append(current)
             current = []
     return waves

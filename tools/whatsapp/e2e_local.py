@@ -496,10 +496,17 @@ def main():
     webhook(FAKE_REQUESTER, button_id='emergency_type_seguranca')
     ok('requester state advanced', USERS[FAKE_REQUESTER]['conversation_state'] == 'awaiting_emergency_timing_seguranca',
        USERS[FAKE_REQUESTER]['conversation_state'])
-    mark = len(SENT)
     webhook(FAKE_REQUESTER, button_id='emergency_timing_hoje')
+    ok('timing -> asks for a description', not REQS
+       and USERS[FAKE_REQUESTER]['conversation_state'] == 'awaiting_emergency_details|seguranca|hoje',
+       USERS[FAKE_REQUESTER]['conversation_state'])
+    mark = len(SENT)
+    webhook(FAKE_REQUESTER, text='Caí em casa, Rua B 10, preciso de ajuda')
     recs = sent_since(mark)
     req = next(iter(REQS.values()), None)
+    ok('request details: type, timing and description',
+       req and req['request_details'] == "Questão de saúde ou segurança - Quando: O quanto antes, hoje\nCaí em casa, Rua B 10, preciso de ajuda",
+       json.dumps(req and req.get('request_details'), ensure_ascii=False))
     ok('request created (pendente)', req and req['status'] == 'pendente', json.dumps(req, default=str) if req else '')
     ok('request ttl = creation + 3 days', req and abs(req['ttl'] - (time.time() + 3 * 86400)) < 60, str(req and req.get('ttl')))
     alert = next((r for r in recs if r['template'] == 'alerta_rede_apoio' and r['to'] == TEST_TO), None)
@@ -519,6 +526,9 @@ def main():
     recs = sent_since(mark)
     ok('request -> aceito by volunteer', REQS[req['ID']]['status'] == 'aceito' and REQS[req['ID']]['accepter_id'] == TEST_TO)
     ok('requester notified', any(r['to'] == FAKE_REQUESTER for r in recs), show(recs))
+    ok('requester notice: "Sua solicitação foi aceita!" + name + wa.me link',
+       any(r['to'] == FAKE_REQUESTER and r['payload']['text']['body'].startswith('Sua solicitação foi aceita!')
+           and f"wa.me/{TEST_TO}" in r['payload']['text']['body'] for r in recs if r['type'] == 'text'), show(recs))
     ok('accepter gets confirmation', any(r['to'] == TEST_TO for r in recs))
     ok('accept messages accepted by Meta', live_ok(recs))
     mark = len(SENT)
@@ -537,13 +547,22 @@ def main():
     resp = check.lambda_handler({}, None)
     recs = sent_since(mark)
     ok('monitor run -> 200', resp['statusCode'] == 200)
-    ok('feedback sent to requester + flag cleared',
-       any(r['to'] == FAKE_REQUESTER for r in recs) and REQS[req['ID']]['feedback_pending'] is False, show(recs))
-    ok('stale conversation -> menu re-sent + reset',
-       any(r['to'] == TEST_TO and r['type'] == 'interactive' for r in recs) and USERS[TEST_TO]['conversation_state'] == 'initial')
+    fb_texts = {r['to']: r['payload']['text']['body'] for r in recs
+                if r['type'] == 'text' and 'Como foi o atendimento?' in r['payload']['text']['body']}
+    ok('feedback asked to requester + flag cleared',
+       'experiência' in fb_texts.get(FAKE_REQUESTER, '') and REQS[req['ID']]['feedback_pending'] is False, show(recs))
+    ok('feedback asked to accepter (after the stale reset freed them)', 'encaminhamento' in fb_texts.get(TEST_TO, ''), show(recs))
+    ok('stale conversation -> menu re-sent',
+       any(r['to'] == TEST_TO and r['type'] == 'interactive' for r in recs))
+    ok('both sides waiting for the comment',
+       USERS[FAKE_REQUESTER]['conversation_state'] == f"awaiting_feedback|{req['ID']}|requester"
+       and USERS[TEST_TO]['conversation_state'] == f"awaiting_feedback|{req['ID']}|accepter",
+       f"{USERS[FAKE_REQUESTER]['conversation_state']} / {USERS[TEST_TO]['conversation_state']}")
     ok('overdue request escalated to supervisor', REQS['OLD-001'].get('escalated') is True and any(r['to'] == SUPERVISOR for r in recs))
     ok('monitor messages accepted by Meta', live_ok(recs))
 
+    feedback_scenario(req['ID'])
+    flows_scenario()
     waves_scenario()
     paging_scenario()
     archive_scenario()
@@ -556,6 +575,125 @@ def main():
     print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} checks passed. "
           f"Graph calls: {len(SENT)} ({sum(r['live'] for r in SENT)} live).")
     sys.exit(1 if failed else 0)
+
+
+def feedback_scenario(request_id):
+    """Resposta à avaliação pedida pelo monitor (lambda_check)."""
+    print("\n6b) Feedback answers")
+    mark = len(SENT)
+    webhook(FAKE_REQUESTER, text='Foi ótimo, obrigado!')
+    recs = sent_since(mark)
+    fb = REQS.get(f"FB-{request_id}-requester")
+    ok('requester comment saved as FB-<request>-requester',
+       fb and fb['comment'] == 'Foi ótimo, obrigado!' and fb['user_id'] == FAKE_REQUESTER
+       and fb.get('creation_timestamp') and fb.get('ttl') and 'status' not in fb, json.dumps(fb, default=str))
+    ok('requester gets the thank-you text and goes back to the start',
+       len(recs) == 1 and recs[0]['payload']['text']['body'].startswith('Agradecemos muito pelo seu retorno!')
+       and 'uniconecta@unicin.org' in recs[0]['payload']['text']['body']
+       and USERS[FAKE_REQUESTER]['conversation_state'] == 'initial', show(recs))
+    webhook(TEST_TO, button_id='menu_emergency')
+    ok('menu button while asked for feedback -> follows the menu, nothing saved',
+       USERS[TEST_TO]['conversation_state'] == 'awaiting_emergency_type' and f"FB-{request_id}-accepter" not in REQS,
+       USERS[TEST_TO]['conversation_state'])
+    ok('feedback item ignored by the monitor', check.lambda_handler({}, None)['statusCode'] == 200)
+
+    USERS[TEST_TO].update(conversation_state=f"awaiting_feedback|{request_id}|accepter",
+                          state_last_updated=(datetime.utcnow() - timedelta(minutes=90)).isoformat())
+    mark = len(SENT)
+    check.lambda_handler({}, None)
+    recs = sent_since(mark)
+    ok('unanswered feedback after 1 h -> back to the start, no menu',
+       USERS[TEST_TO]['conversation_state'] == 'initial' and not any(r['to'] == TEST_TO for r in recs), show(recs))
+
+    # Quem está no meio de outro pedido não é interrompido pela avaliação.
+    REQS['BSY-001'] = {'ID': 'BSY-001', 'status': 'aceito', 'feedback_pending': True, 'requester_id': FAKE_REQUESTER,
+                       'requester_wa': FAKE_REQUESTER, 'accepter_id': TEST_TO,
+                       'acceptance_timestamp': (datetime.utcnow() - timedelta(minutes=12)).isoformat(),
+                       'creation_timestamp': datetime.utcnow().isoformat()}
+    USERS[FAKE_REQUESTER].update(conversation_state='awaiting_chat_details', state_last_updated=datetime.utcnow().isoformat())
+    mark = len(SENT)
+    check.lambda_handler({}, None)
+    recs = sent_since(mark)
+    ok('busy requester not asked; accepter asked',
+       not any(r['to'] == FAKE_REQUESTER for r in recs)
+       and USERS[FAKE_REQUESTER]['conversation_state'] == 'awaiting_chat_details'
+       and USERS[TEST_TO]['conversation_state'] == 'awaiting_feedback|BSY-001|accepter', show(recs))
+    for uid in (FAKE_REQUESTER, TEST_TO):
+        USERS[uid]['conversation_state'] = 'initial'
+    del REQS['BSY-001']
+
+
+def flows_scenario():
+    """Cada ramo do fluxo ajustado de usabilidade chega ao pedido com os textos novos."""
+    print("\n6c) Adjusted usability flows")
+
+    def texts(recs, to):
+        return [r['payload']['text']['body'] for r in recs if r['type'] == 'text' and r['to'] == to]
+
+    def run(steps):
+        """Envia os passos (('b', id) botão / ('t', texto)) e devolve (envios, pedido novo)."""
+        before, mark = set(REQS), len(SENT)
+        for kind, value in steps:
+            webhook(FAKE_REQUESTER, **({'button_id': value} if kind == 'b' else {'text': value}))
+        new = [REQS[k] for k in set(REQS) - before]
+        return sent_since(mark), (new[0] if new else None)
+
+    def buttons(recs):
+        r = next((r for r in recs if r['type'] == 'interactive'), None)
+        return [b['reply']['title'] for b in r['payload']['interactive']['action']['buttons']] if r else []
+
+    recs, _ = run([('b', 'menu_emergency')])
+    ok('urgent types: Saúde e Segurança / Atividade/Evento / Outra urgência (≤20)',
+       buttons(recs) == ['Saúde e Segurança', 'Atividade/Evento', 'Outra urgência'], str(buttons(recs)))
+    recs, req = run([('b', 'emergency_type_outra')])
+    ok('Outra urgência -> skips the timing, asks to describe',
+       not req and any('não se enquadra' in t for t in texts(recs, FAKE_REQUESTER)), show(recs))
+    recs, req = run([('t', 'Faltou luz e estou sem remédio')])
+    ok('Outra urgência -> request emergency_outra + urgent confirmation',
+       req and req['request_type'] == 'emergency_outra'
+       and req['request_details'] == "Outra situação urgente\nFaltou luz e estou sem remédio"
+       and any('192' in t for t in texts(recs, FAKE_REQUESTER)), json.dumps(req, default=str, ensure_ascii=False))
+
+    recs, req = run([('b', 'menu_emergency'), ('b', 'emergency_type_atividade'), ('b', 'emergency_timing_semana')])
+    ok('Atividade/Evento -> timing -> asks "Onde você está?"',
+       not req and any('Onde você está?' in t for t in texts(recs, FAKE_REQUESTER)), show(recs))
+    recs, req = run([('b', 'menu_ride')])
+    ok('button during the description -> follows the menu, no empty request',
+       not req and USERS[FAKE_REQUESTER]['conversation_state'] == 'awaiting_ride_type')
+    ok('ride types end with "3- Outro destino"', buttons(recs)[-1:] == ['3- Outro destino'], str(buttons(recs)))
+
+    recs, req = run([('b', 'ride_type_medical')])
+    ok('Consulta Médica -> asks day/time and destination', any('📍 Qual o endereço de destino?' in t for t in texts(recs, FAKE_REQUESTER)))
+    recs, req = run([('t', 'Segunda 8h, Hospital Z, ida e volta')])
+    ok('Consulta Médica -> request ride_medical', req and req['request_type'] == 'ride_medical'
+       and req['request_details'] == 'Segunda 8h, Hospital Z, ida e volta')
+
+    recs, req = run([('b', 'menu_ride'), ('b', 'ride_type_pharmacy'), ('t', 'Hoje 15h, só ida')])
+    ok('Farmácia -> day/time then "Tudo bem! Conte um pouco mais"',
+       not req and any(t.startswith('Tudo bem! Conte um pouco mais') for t in texts(recs, FAKE_REQUESTER)), show(recs))
+    recs, req = run([('t', 'Buscar remédio na farmácia do centro')])
+    ok('Farmácia -> request with both answers + "OK obrigado"',
+       req and req['request_type'] == 'ride_pharmacy'
+       and req['request_details'] == "Dia e horário: Hoje 15h, só ida\nDetalhes: Buscar remédio na farmácia do centro"
+       and any(t.startswith('OK obrigado') for t in texts(recs, FAKE_REQUESTER)), json.dumps(req, default=str, ensure_ascii=False))
+
+    recs, req = run([('b', 'menu_ride'), ('b', 'ride_type_other'), ('t', 'Ir ao cartório')])
+    ok('Outro destino -> "Claro!" then "Por favor, descreva"',
+       not req and any(t.startswith('Claro! Conta pra gente') for t in texts(recs, FAKE_REQUESTER))
+       and any(t.startswith('Por favor, descreva') for t in texts(recs, FAKE_REQUESTER)), show(recs))
+    recs, req = run([('t', 'Quarta 14h, centro')])
+    ok('Outro destino -> request ride_other + "OK obrigado"',
+       req and req['request_type'] == 'ride_other' and req['request_details'] == "Necessidade: Ir ao cartório\nDetalhes: Quarta 14h, centro"
+       and any(t.startswith('OK obrigado') for t in texts(recs, FAKE_REQUESTER)))
+
+    recs, req = run([('b', 'menu_chat')])
+    sent = texts(recs, FAKE_REQUESTER)
+    ok('Bate-papo -> both messages at once', len(sent) == 2 and sent[0].startswith('Olá! Que bom que você nos procurou!')
+       and sent[1].startswith('Para combinarmos direitinho'), show(recs))
+    recs, req = run([('t', 'Sábado de manhã, presencial')])
+    ok('Bate-papo -> one answer creates the request + "OK obrigado"',
+       req and req['request_type'] == 'chat' and any(t.startswith('OK obrigado') for t in texts(recs, FAKE_REQUESTER)))
+    ok('requester back at the start', USERS[FAKE_REQUESTER]['conversation_state'] == 'initial')
 
 
 def waves_scenario():
@@ -678,12 +816,32 @@ def waves_scenario():
     REQS.clear()
     webhook(REQ, button_id='menu_emergency')
     webhook(REQ, button_id='emergency_type_seguranca')
-    mark = len(SENT)
     webhook(REQ, button_id='emergency_timing_hoje')
+    mark = len(SENT)
+    webhook(REQ, text='Preciso de ajuda agora')
     recs = sent_since(mark)
     req = next(iter(REQS.values()))
     ok('urgent -> whole network at once', alerted(recs) == wave1 | wave2 | wave3, str(len(alerted(recs))))
     ok('urgent -> no pending waves, supervisor clock started', req['waves'] == [] and req.get('all_notified_at'))
+
+    print("\n9b) Waves: rides go first to volunteers with a car")
+    REQS.clear()
+    USERS['5531900000106']['possui_carro'] = True   # nível 4, com carro
+    USERS['5531900000104']['possui_carro'] = True   # nível 2, com carro
+    webhook(REQ, button_id='menu_ride')
+    webhook(REQ, button_id='ride_type_medical')
+    mark = len(SENT)
+    webhook(REQ, text='Sexta 9h, Clínica Y')
+    recs = sent_since(mark)
+    ok('ride -> wave 1 = the drivers, nearest first', alerted(recs) == {'5531900000104', '5531900000106'}, str(sorted(alerted(recs))))
+    req = next(iter(REQS.values()))
+    ok('then the others by proximity', [set(r['id'] for r in w) for w in req['waves']][0] == wave1,
+       json.dumps(req['waves']))
+    REQS.clear()
+    webhook(REQ, button_id='menu_chat')
+    mark = len(SENT)
+    webhook(REQ, text='Amanhã à tarde, por telefone')
+    ok('chat -> cars do not matter (wave 1 by proximity)', alerted(sent_since(mark)) == wave1)
     bot.DISPATCH_MODE = 'broadcast'
 
 
@@ -696,8 +854,10 @@ def paging_scenario():
         REQS[f'PG-{i}'] = {'ID': f'PG-{i}', 'status': 'pendente', 'requester_name': f'P{i}', 'creation_timestamp': created}
     accepted = (datetime.utcnow() - timedelta(minutes=15)).isoformat()
     for i in range(2):
+        uid = f'553190000020{i}'
+        USERS[uid] = {'ID': uid, 'status': 'approved', 'conversation_state': 'initial'}
         REQS[f'FB-{i}'] = {'ID': f'FB-{i}', 'status': 'aceito', 'feedback_pending': True,
-                           'acceptance_timestamp': accepted, 'requester_wa': f'553190000020{i}'}
+                           'acceptance_timestamp': accepted, 'requester_id': uid, 'requester_wa': uid}
     stale_at = (datetime.utcnow() - timedelta(minutes=90)).isoformat()
     stale = ('5531900000301', '5531900000302')
     for uid in stale:

@@ -62,14 +62,24 @@ STAGE, VERSION = split_stage(APP_STAGE)
 
 
 # --- Mensagens ---
-# Enviada ~10-15 min após o aceite (não junto do atendimento). Mantida idêntica ao
-# texto em chatbot_act.py (MESSAGES['feedback_prompt']).
-FEEDBACK_PROMPT = (
-    "A sua opinião é muito importante para nós! Estamos sempre em busca de evoluir a usabilidade e a experiência da Rede UniConecta CCCI.\n\n"
-    "Se quiser contribuir com sugestões, críticas construtivas ou melhorias, envie um e-mail para: uniconecta@unicin.org\n\n"
-    "A Rede de apoio UniConecta CCCI é construída por todos nós. \n"
-    "Contamos com você para torná-la cada vez mais funcional, acolhedora e interassistencial!"
-)
+# Avaliação, ~10-15 min após o aceite (não junto do atendimento), uma para cada lado.
+# A resposta é tratada pelo BOT (estado 'awaiting_feedback|<pedido>|<papel>'), que grava o
+# comentário e agradece com MESSAGES['feedback_thanks'].
+FEEDBACK_PROMPTS = {
+    'requester': (
+        "*Como foi o atendimento?*\n\n"
+        "Gostaríamos de saber como foi sua experiência com o atendimento da Rede de Apoio.\n"
+        "Conte para nós como foi, se ficou tudo bem e se existe alguma situação que você gostaria que acompanhássemos.\n\n"
+        "✍️ Deixe aqui seu comentário:"
+    ),
+    'accepter': (
+        "*Como foi o atendimento?*\n\n"
+        "Seu retorno é muito importante para acompanharmos como está funcionando a Rede de Apoio.\n"
+        "Conte como foi o atendimento e se você percebeu alguma situação que merece atenção ou algum encaminhamento.\n\n"
+        "✍️ Deixe aqui seu comentário:"
+    ),
+}
+FEEDBACK_STATE_PREFIX = 'awaiting_feedback|'
 
 # Atraso mínimo antes de enviar o feedback após o aceite.
 FEEDBACK_DELAY_MINUTES = 10
@@ -433,6 +443,8 @@ def handle_stale_conversations(now, start_time_iso):
                          values={':initial': 'initial', ':state': state, ':ts': timestamp_str}):
                 logger.info(f"User {user_id}: state changed since the scan; skipping.")
                 continue
+            if state.startswith(FEEDBACK_STATE_PREFIX):
+                continue  # avaliação sem resposta: só volta ao início, sem reenviar o menu
             if not send_main_menu_with_buttons(user_id_wa):
                 # Put the state back so the next run tries again, as when the reset came after the send.
                 claim(users_table, {'ID': user_id}, 'SET conversation_state = :state',
@@ -440,9 +452,38 @@ def handle_stale_conversations(now, start_time_iso):
                       values={':initial': 'initial', ':state': state, ':ts': timestamp_str})
 
 
+def wa_target(user_id, fallback=None):
+    """Número real de envio de um usuário: o wa_jid gravado pelo BOT, senão o fallback ou o ID."""
+    try:
+        item = users_table.get_item(Key={'ID': user_id}).get('Item') or {}
+    except Exception as e:
+        logger.error(f"Error reading user '{user_id}': {e}")
+        item = {}
+    return item.get('wa_jid') or fallback or user_id
+
+
+def ask_feedback(request_id, role, user_id, target, now):
+    """Põe a pessoa no estado de avaliação e envia a pergunta. Só quando ela está no início
+    da conversa: quem está no meio de outro pedido não é interrompido (e não recebe a
+    avaliação deste). Devolve 'sent', 'busy' ou 'failed' (falha de envio)."""
+    state = f"{FEEDBACK_STATE_PREFIX}{request_id}|{role}"
+    ts = now.replace(tzinfo=None).isoformat()
+    if not claim(users_table, {'ID': user_id}, 'SET conversation_state = :fb, state_last_updated = :ts',
+                 # AND vem antes de OR: estado inicial, ou usuário existente ainda sem estado.
+                 'conversation_state = :initial OR attribute_exists(ID) AND attribute_not_exists(conversation_state)',
+                 values={':fb': state, ':ts': ts, ':initial': 'initial'}):
+        logger.info(f"Request {request_id}: {role} {user_id} is busy (or unknown); feedback not asked.")
+        return 'busy'
+    if send_text(target, FEEDBACK_PROMPTS[role]):
+        return 'sent'
+    claim(users_table, {'ID': user_id}, 'SET conversation_state = :initial', 'conversation_state = :fb',
+          values={':fb': state, ':initial': 'initial'})
+    return 'failed'
+
+
 def handle_pending_feedback(now):
-    """(4) Enviar a mensagem de feedback ~10-15 min após o aceite (não junto do
-    atendimento). O bot marca feedback_pending=True e acceptance_timestamp ao aceitar."""
+    """(4) Pedir a avaliação ~10-15 min após o aceite (não junto do atendimento), a quem
+    pediu e a quem aceitou. O bot marca feedback_pending=True e acceptance_timestamp ao aceitar."""
     logger.info("Checking for pending feedback messages...")
     cutoff = now - timedelta(minutes=FEEDBACK_DELAY_MINUTES)
 
@@ -463,9 +504,13 @@ def handle_pending_feedback(now):
         if accepted_at > cutoff:
             continue  # aceite recente demais; envia numa próxima execução do monitor
 
-        target = item.get('requester_wa') or item.get('requester_id')
-        if not target:
-            logger.warning(f"Skipping request {item['ID']} for feedback: no requester target.")
+        people = []
+        if item.get('requester_id'):
+            people.append(('requester', item['requester_id'], item.get('requester_wa') or item['requester_id']))
+        if item.get('accepter_id'):
+            people.append(('accepter', item['accepter_id'], wa_target(item['accepter_id'])))
+        if not people:
+            logger.warning(f"Skipping request {item['ID']} for feedback: no requester or accepter.")
             continue
 
         # Cleared before sending, so a second run cannot send the same feedback again.
@@ -473,9 +518,10 @@ def handle_pending_feedback(now):
                      values={':false': False, ':true': True}):
             logger.info(f"Request {item['ID']}: feedback already sent by another run; skipping.")
             continue
-        logger.info(f"Sending delayed feedback for request {item['ID']} to {target}.")
-        if not send_text(f"{target}@s.whatsapp.net", FEEDBACK_PROMPT):
-            # Pending again, so the next run tries again, as when the flag was cleared after the send.
+        logger.info(f"Asking feedback for request {item['ID']} from {[p[0] for p in people]}.")
+        results = [ask_feedback(item['ID'], role, uid, target, now) for role, uid, target in people]
+        if 'failed' in results and 'sent' not in results:
+            # Nada saiu por falha de envio: pendente de novo, para a próxima execução tentar.
             claim(requests_table, {'ID': item['ID']}, 'SET feedback_pending = :true', 'feedback_pending = :false',
                   values={':false': False, ':true': True})
 
