@@ -17,15 +17,7 @@ import { useToast } from "@/hooks/use-toast";
 import { LogOut, Check, X, Eye, Pencil, Trash2, RefreshCw } from "lucide-react";
 import type { SupportRecipient } from "@/components/RecipientTable";
 import { EditRecipientDialog } from "@/components/EditRecipientDialog";
-
-const DetailRow = ({ label, value }: { label: string; value: string | null | undefined }) => (
-  value ? (
-    <div className="py-2 border-b border-border/50 last:border-0">
-      <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">{label}</span>
-      <p className="text-sm text-foreground mt-0.5 whitespace-pre-wrap">{value}</p>
-    </div>
-  ) : null
-);
+import { CadastroDetalhe } from "@/components/CadastroDetalhe";
 
 // Situação no ICnet; "· nome diferente" chama a atenção quando o nome devolvido não bate com o do cadastro.
 const IcnetBadge = ({ r }: { r: SupportRecipient }) => {
@@ -279,60 +271,47 @@ const Dashboard = () => {
           </DialogHeader>
           {selected && (
             <ScrollArea className="max-h-[65vh] pr-4">
-              <div className="space-y-1">
-                <DetailRow label="Como prefere ser chamado(a)" value={selected.nome_preferido} />
-                <DetailRow label="Idade" value={String(selected.idade)} />
-                <DetailRow label="Endereço" value={selected.endereco} />
-                <DetailRow label="Bairro" value={selected.bairro} />
-                <DetailRow label="WhatsApp" value={selected.whatsapp} />
-                <DetailRow label="Voluntário IC" value={selected.voluntario_ic} />
-                <div className="py-2 border-b border-border/50">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Consulta ao ICnet</span>
-                    <Button size="sm" variant="outline" onClick={() => handleIcnetCheck(selected)} disabled={checkingId === selected.id}>
-                      <RefreshCw className={`h-3.5 w-3.5 mr-1 ${checkingId === selected.id ? "animate-spin" : ""}`} />
-                      Consultar ICnet
-                    </Button>
-                  </div>
-                  <div className="mt-1 space-y-1 text-sm">
-                    <Badge variant={icnetSituation(selected).variant}>{icnetSituation(selected).label}</Badge>
-                    {selected.icnet_consultado_em && (
-                      <>
-                        <p>
-                          <span className="text-muted-foreground">ICs no ICnet: </span>
-                          {selected.icnet_ics && selected.icnet_ics.length > 0
-                            ? selected.icnet_ics.map((ic) => `${ic.sigla} (${ic.ativo ? "ativo" : "inativo"})`).join(", ")
-                            : "nenhuma"}
-                        </p>
-                        <p>
-                          <span className="text-muted-foreground">Nome no ICnet: </span>
-                          {selected.icnet_nomes && selected.icnet_nomes.length > 0
-                            ? `${selected.icnet_nomes.join(" / ")} — ${NAME_MATCH_LABEL[compareNames(selected.nome_completo, selected.icnet_nomes) ?? "diferente"]}`
-                            : "não informado pelo ICnet"}
-                        </p>
-                        <p className="text-xs text-muted-foreground">Consultado em {formatDateTime(selected.icnet_consultado_em)}</p>
-                      </>
-                    )}
-                    {selected.icnet_erro && (
-                      <p className="text-xs text-destructive">
-                        {selected.icnet_erro} ({formatDateTime(selected.icnet_erro_em)})
-                      </p>
-                    )}
-                  </div>
-                </div>
-                <DetailRow label="Mora sozinho" value={selected.mora_sozinho ? "Sim" : "Não"} />
-                <DetailRow label="Plano de Saúde" value={selected.plano_saude} />
-                <DetailRow label="Hospital de preferência" value={selected.hospital_preferencia} />
-                <DetailRow label="Cadastro UBS" value={selected.cadastro_ubs} />
-                <DetailRow label="Profissional de Saúde" value={selected.profissional_saude} />
-                <DetailRow label="Alergias / Intolerâncias" value={selected.alergia_intolerancia} />
-                <DetailRow label="Tipo Sanguíneo" value={selected.tipo_sanguineo} />
-                <DetailRow label="Medicação Contínua" value={selected.medicacao_continua} />
-                <DetailRow label="Pet" value={selected.tem_pet} />
-                <DetailRow label="Contato Familiar" value={selected.contato_familia} />
-                <DetailRow label="Contato CCCI" value={selected.contato_ccci} />
-                <DetailRow label="Pessoa com chaves" value={selected.pessoa_chaves} />
-              </div>
+              <CadastroDetalhe
+                recipient={selected}
+                depoisDe={{
+                  voluntario_ic: (
+                    <div className="py-2 border-b border-border/50">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Consulta ao ICnet</span>
+                        <Button size="sm" variant="outline" onClick={() => handleIcnetCheck(selected)} disabled={checkingId === selected.id}>
+                          <RefreshCw className={`h-3.5 w-3.5 mr-1 ${checkingId === selected.id ? "animate-spin" : ""}`} />
+                          Consultar ICnet
+                        </Button>
+                      </div>
+                      <div className="mt-1 space-y-1 text-sm">
+                        <Badge variant={icnetSituation(selected).variant}>{icnetSituation(selected).label}</Badge>
+                        {selected.icnet_consultado_em && (
+                          <>
+                            <p>
+                              <span className="text-muted-foreground">ICs no ICnet: </span>
+                              {selected.icnet_ics && selected.icnet_ics.length > 0
+                                ? selected.icnet_ics.map((ic) => `${ic.sigla} (${ic.ativo ? "ativo" : "inativo"})`).join(", ")
+                                : "nenhuma"}
+                            </p>
+                            <p>
+                              <span className="text-muted-foreground">Nome no ICnet: </span>
+                              {selected.icnet_nomes && selected.icnet_nomes.length > 0
+                                ? `${selected.icnet_nomes.join(" / ")} — ${NAME_MATCH_LABEL[compareNames(selected.nome_completo, selected.icnet_nomes) ?? "diferente"]}`
+                                : "não informado pelo ICnet"}
+                            </p>
+                            <p className="text-xs text-muted-foreground">Consultado em {formatDateTime(selected.icnet_consultado_em)}</p>
+                          </>
+                        )}
+                        {selected.icnet_erro && (
+                          <p className="text-xs text-destructive">
+                            {selected.icnet_erro} ({formatDateTime(selected.icnet_erro_em)})
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  ),
+                }}
+              />
             </ScrollArea>
           )}
         </DialogContent>

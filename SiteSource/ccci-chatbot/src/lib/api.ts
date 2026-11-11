@@ -34,13 +34,21 @@ const request = async <T>(path: string, opts: RequestOptions = {}): Promise<T> =
   return data as T;
 };
 
+export type PessoaVinculada = { nome: string; telefone: string; vinculo: string };
+
 export type CadastroPayload = {
-  nome_completo: string; nome_preferido: string | null; idade: number; endereco: string; bairro: string;
-  whatsapp: string; voluntario_ic: string; mora_sozinho: boolean;
+  nome_completo: string; nome_preferido: string | null; data_nascimento: string | null; idade: number | null;
+  endereco: string; bairro: string; condominio: string | null; cep: string | null;
+  whatsapp: string; voluntario_ic: string; mora_sozinho: boolean | null;
+  pessoas_vinculadas: PessoaVinculada[] | null;
+  possui_carro: boolean | null; carona_disponibilidade: string | null; carona_regiao: string | null;
+  carona_dias: string[]; carona_periodo: string[];
   plano_saude: string | null; hospital_preferencia: string | null; tem_pet: string | null;
   cadastro_ubs: string | null; contato_familia: string; contato_ccci: string;
   pessoa_chaves: string | null; profissional_saude: string | null;
   alergia_intolerancia: string | null; tipo_sanguineo: string | null; medicacao_continua: string | null;
+  // Aceite da Declaração de Ciência e Compromisso; a API grava a data/hora em termo_aceito_em.
+  termo_aceito: boolean;
 };
 
 export const login = (email: string, password: string) =>
