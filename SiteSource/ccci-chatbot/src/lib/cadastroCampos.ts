@@ -35,6 +35,10 @@ export type Campo = {
   placeholder?: string;
   linhas?: number; // altura do Textarea
   visivel?: (form: FormState) => boolean;
+  // Sempre na tela, mas só se responde quando ativo (ex.: detalhes da carona só com carro = Sim).
+  // Inativo, o campo aparece desabilitado e não é conferido nem enviado.
+  ativo?: (form: FormState) => boolean;
+  quandoInativo?: string; // aviso mostrado enquanto o campo está desabilitado
 };
 
 export type Secao = { id: SecaoId; titulo: string; introducao?: string[] };
@@ -117,6 +121,7 @@ export const SECOES: Secao[] = [
 ];
 
 const temCarro = (form: FormState) => texto(form, "possui_carro") === "sim";
+const CARONA_INATIVA = 'Responda depois de marcar "Sim" na pergunta do carro.';
 
 export const CAMPOS: Campo[] = [
   // Dados Pessoais
@@ -169,8 +174,6 @@ export const CAMPOS: Campo[] = [
     introducao: [
       "Para que a Rede de Apoio possa estar preparada para situações que eventualmente envolvam pessoas que residem com você, informe abaixo os dados de quem poderá necessitar de apoio. A pessoa não será cadastrada como voluntária. Essas informações serão utilizadas apenas para facilitar eventual contato e assistência.",
     ],
-    // Só faz sentido para quem não mora sozinho.
-    visivel: (form) => texto(form, "mora_sozinho") === "nao",
   },
 
   // Carona Solidária
@@ -181,19 +184,23 @@ export const CAMPOS: Campo[] = [
   },
   {
     key: "carona_disponibilidade", secao: "carona", tipo: "opcao", obrigatorio: true, opcoes: CARONA_DISPONIBILIDADE,
-    pergunta: "Sua disponibilidade para oferecer caronas seria:", rotulo: "Disponibilidade para caronas", visivel: temCarro,
+    pergunta: "Sua disponibilidade para oferecer caronas seria:", rotulo: "Disponibilidade para caronas",
+    ativo: temCarro, quandoInativo: CARONA_INATIVA,
   },
   {
     key: "carona_regiao", secao: "carona", tipo: "text", obrigatorio: false,
-    pergunta: "Em qual bairro ou região você poderia oferecer caronas?", rotulo: "Região das caronas", visivel: temCarro,
+    pergunta: "Em qual bairro ou região você poderia oferecer caronas?", rotulo: "Região das caronas",
+    ativo: temCarro, quandoInativo: CARONA_INATIVA,
   },
   {
     key: "carona_dias", secao: "carona", tipo: "multipla", obrigatorio: false, opcoes: DIAS_SEMANA,
-    pergunta: "Em quais dias da semana?", rotulo: "Dias para caronas", visivel: temCarro,
+    pergunta: "Em quais dias da semana?", rotulo: "Dias para caronas",
+    ativo: temCarro, quandoInativo: CARONA_INATIVA,
   },
   {
     key: "carona_periodo", secao: "carona", tipo: "multipla", obrigatorio: false, opcoes: PERIODOS,
-    pergunta: "Em quais períodos?", rotulo: "Períodos para caronas", visivel: temCarro,
+    pergunta: "Em quais períodos?", rotulo: "Períodos para caronas",
+    ativo: temCarro, quandoInativo: CARONA_INATIVA,
   },
 
   // Saúde e Emergência
@@ -250,6 +257,10 @@ export const CAMPOS: Campo[] = [
 export const camposDaSecao = (secao: SecaoId) => CAMPOS.filter((c) => c.secao === secao);
 
 export const campoVisivel = (campo: Campo, form: FormState) => !campo.visivel || campo.visivel(form);
+
+/** Visível e respondível: só esses campos são conferidos e enviados à API. */
+export const campoAtivo = (campo: Campo, form: FormState) =>
+  campoVisivel(campo, form) && (!campo.ativo || campo.ativo(form));
 
 // --- Declaração de Ciência e Compromisso (substitui o antigo termo da LGPD) ---
 
@@ -410,7 +421,7 @@ const valorPreenchido = (campo: Campo, form: FormState): boolean => {
 
 /** Campo obrigatório e visível ainda vazio (o painel destaca esses campos em cadastros antigos). */
 export const campoFaltando = (campo: Campo, form: FormState) =>
-  campo.obrigatorio && campoVisivel(campo, form) && !valorPreenchido(campo, form);
+  campo.obrigatorio && campoAtivo(campo, form) && !valorPreenchido(campo, form);
 
 export type ErroFormulario = { campo: Campo; mensagem: string };
 
@@ -420,7 +431,7 @@ export type ErroFormulario = { campo: Campo; mensagem: string };
  */
 export const validarFormulario = (form: FormState, modo: "cadastro" | "edicao"): ErroFormulario | null => {
   for (const campo of CAMPOS) {
-    if (!campoVisivel(campo, form)) continue;
+    if (!campoAtivo(campo, form)) continue;
     const valor = form[campo.key];
     if (campo.tipo === "condominio" && modo === "cadastro" && (valor as CondominioForm).opcao === CONDOMINIO_OUTRO && !(valor as CondominioForm).outro.trim()) {
       return { campo, mensagem: "Escreva o nome do condomínio." };
@@ -454,7 +465,7 @@ const textoOuNull = (s: string) => (s.trim() === "" ? null : s.trim());
 export const paraPayload = (form: FormState): Omit<CadastroPayload, "termo_aceito"> => {
   const payload: Record<string, unknown> = {};
   for (const campo of CAMPOS) {
-    const visivel = campoVisivel(campo, form);
+    const visivel = campoAtivo(campo, form);
     const valor = form[campo.key];
     switch (campo.tipo) {
       case "simnao": {
@@ -470,9 +481,7 @@ export const paraPayload = (form: FormState): Omit<CadastroPayload, "termo_aceit
         break;
       case "pessoas": {
         const p = valor as PessoasForm;
-        // Quem mora sozinho não tem pessoas vinculadas: grava lista vazia ("Não").
-        if (!visivel) payload[campo.key] = texto(form, "mora_sozinho") === "sim" ? [] : null;
-        else if (p.tem === "") payload[campo.key] = null;
+        if (p.tem === "") payload[campo.key] = null;
         else if (p.tem === "nao") payload[campo.key] = [];
         else
           payload[campo.key] = p.lista.map((x) => ({
@@ -536,7 +545,7 @@ export const valorParaExibir = (campo: Campo, r: SupportRecipient): string | nul
 /** Campos que aparecem no detalhe de um cadastro gravado (os condicionais só quando se aplicam). */
 export const camposDoDetalhe = (r: SupportRecipient) => {
   const form = formularioDoCadastro(r);
-  return CAMPOS.filter((c) => campoVisivel(c, form) || valorParaExibir(c, r) !== null).map((campo) => ({
+  return CAMPOS.filter((c) => campoAtivo(c, form) || valorParaExibir(c, r) !== null).map((campo) => ({
     campo,
     valor: valorParaExibir(campo, r),
     faltando: campoFaltando(campo, form),
