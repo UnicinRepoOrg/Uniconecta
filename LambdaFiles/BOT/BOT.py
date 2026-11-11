@@ -158,7 +158,7 @@ MESSAGES = {
         "👉 https://www.youtube.com/watch?v=1RDTkwXRtDQ\n\n"
         "📘 Quer entender melhor como usar?\n"
         "Clique aqui para baixar o Manual de Usabilidade:\n"
-        "👉 https://drive.google.com/file/d/1ESrx_r2kdJ1zygNscEKeVmUilJAe4ry9/view?usp=drive_link \n\n"
+        "👉 https://drive.google.com/file/d/10GfopR_j7J0s6qQ9_j5TVCWVvsgB_MFF/view?usp=sharing \n\n"
         "Agora é só escolher uma das opções abaixo 👇:"
     ),
     'emergency_confirmation': "Sua solicitação foi enviada aos voluntários mais próximos. \nSe ninguém entrar em contato rapidamente, por favor acione alguém de confiança que esteja por perto ou ligue para o 192 imediatamente. \nSua segurança é prioridade.",
@@ -166,13 +166,26 @@ MESSAGES = {
     'erro_usuario_nao_encontrado': "Você não está registrado no nosso sistema. Não é possível continuar.",
     'cadastro_em_analise': "Seu cadastro foi recebido e está em análise pela Comissão de Voluntariado. Assim que for aprovado, você poderá usar este canal. Obrigado pela paciência!",
     'erro_sem_contato_emergencia': "Ação não realizada. Você não possui uma lista de contatos cadastrada.",
+    # Bate-papo: as duas mensagens saem juntas e uma resposta cria o pedido.
     'pergunta_batepapo': (
-        "Opa. Que bom que você nos procurou.\n"
-        "Conte com a rede de apoio pra trocar ideias, desabafar ou simplesmente conversar. Podemos verificar agora quem está disponível pra falar com você, tudo bem?\n\n"
-        "Pra gente combinar certinho, quando e onde você gostaria de conversar? Assim já vemos quem pode estar disponível."
+        "Olá! Que bom que você nos procurou!\n\n"
+        "Às vezes, tudo o que precisamos é de alguém para conversar, trocar ideias ou simplesmente nos ouvir.\n\n"
+        "Nossa Rede de Apoio está aqui para conectar voluntários que possam compartilhar esse momento com você.\n\n"
+        "Para encontrarmos alguém disponível, conta pra gente, quando e onde você gostaria de conversar?\n\n"
+        "Assim, podemos verificar as possibilidades e combinar esse encontro!"
+    ),
+    'pergunta_batepapo_detalhes': (
+        "Para combinarmos direitinho, conta pra gente:\n\n"
+        "Quando você gostaria de conversar (dia e horário) e onde seria melhor para você "
+        "(presencialmente, por telefone ou WhatsApp)?\n\n"
+        "Fique à vontade para compartilhar os detalhes."
     ),
     'manual_usabilidade': """*Manual de Usabilidade - UniConecta CCCI*...""",
-    'solicitacao_aceita_para_solicitante': "Boas notícias! *{accepter_name}* aceitou sua solicitação.\nPara falar com ele(a), clique no link: {accepter_link}",
+    'solicitacao_aceita_para_solicitante': (
+        "Sua solicitação foi aceita!\n\n"
+        "*{accepter_name}*, está disponível para ajudar você.\n\n"
+        "Para iniciar a conversa, clique no link abaixo:\n{accepter_link}"
+    ),
     'confirmacao_aceite_para_aceitante': "Obrigado! Você aceitou a solicitação de *{requester_name}*.\nPara falar com ele(a), clique no link: {requester_link}",
     'confirmacao_recusa_para_recusante': "Ok, solicitação recusada. Agradecemos o seu tempo.",
     'erro_solicitacao_nao_encontrada': "Ops! Não encontramos uma solicitação ativa com este código.",
@@ -180,17 +193,47 @@ MESSAGES = {
     'notificacao_outros_contatos': "A solicitação de ajuda de *{requester_name}* já foi atendida.",
     'emergency_new_type_prompt': "Selecione a opção com o tipo de ajuda que precisa:",
     'emergency_new_timing_prompt': "Para quando você precisa dessa ajuda?",
-    'emergency_intro': "Olá! Sou o canal da UniConecta CCCI, sua rede de apoio entre voluntários.\nVamos entender sua necessidade para acionar o suporte certo.",
-    'emergency_type_1_confirm': "Entendido! Vamos agir o mais rápido possível, tá bem?\nMantenha a calma...",
-    'emergency_type_2_confirm': "Entendi! Estamos aqui com você.\nMantenha a calma...",
+    # Ajuda Urgente: depois do tipo (e do prazo), a pessoa descreve a situação em texto.
+    'emergency_ask_details': (
+        "Para que possamos direcionar sua solicitação da melhor forma, conte um pouco mais sobre o que está "
+        "acontecendo e que tipo de apoio você precisa neste momento.\n\n"
+        "Onde você está? Qual é a sua necessidade?\n"
+        "Existe algum risco imediato ou alguém precisa de atendimento urgente?"
+    ),
+    'emergency_ask_other': (
+        "Se você está passando por alguma situação urgente que não se enquadra nas opções anteriores, "
+        "conte conosco para buscar o melhor encaminhamento possível.\n\n"
+        "Descreva brevemente o que aconteceu, onde você está e que tipo de ajuda precisa."
+    ),
     'ride_intro': "Legal, vamos tentar organizar isso rapidinho pra você!\nMe diz uma coisa:\nVocê precisa de carona para:",
-    'ride_ask_details_medical': "Beleza! Conte com nossa rede de voluntários!\n Mas me diga qual é o dia e horário da sua consulta ou saída? e onde é?",
-    'ride_ask_details_pharmacy': "Beleza! Conte com nossa rede de voluntários!\n Mas me diga Qual é o dia e horário?  E qual seria o endereço?",
-    'ride_ask_details_other_step1': "Beleza! Conta pra gente com o que você precisa de apoio. Vamos ver como podemos ajudar!",
-    'ride_ask_details_other_step2': "Claro! Vamos acionar a rede. Me diz qual dia você prefere e a gente vê quem pode te acompanhar.",
-    'ride_confirm_other_final': "Tudo certo! Um voluntário da nossa rede de apoio vai falar com você no privado pra combinar direitinho! (não precisa responder essa mensagem)",
+    'ride_ask_details_medical': (
+        "Para que possamos buscar uma carona, informe, por favor:\n\n"
+        "🗓️ Qual o dia e horário?\n"
+        "📍 Qual o endereço de destino?\n\n"
+        "Se precisar de ida e volta, informe também."
+    ),
+    'ride_ask_details_pharmacy': (
+        "Para que possamos buscar uma carona, informe, por favor:\n\n"
+        "Qual o dia e horário?\n"
+        "Se precisar de ida e volta, informe também."
+    ),
+    'ride_ask_details_pharmacy_step2': (
+        "Tudo bem! Conte um pouco mais sobre o que você precisa. Assim, podemos compreender sua necessidade "
+        "e buscar a melhor forma de ajudar."
+    ),
+    'ride_ask_details_other_step1': "Claro! Conta pra gente o que você precisa. Vamos buscar juntos a melhor forma de oferecer esse apoio!",
+    'ride_ask_details_other_step2': (
+        "Por favor, descreva sua necessidade com alguns detalhes, como o tipo de ajuda que procura, o dia, "
+        "horário e local, se houver. Assim, conseguimos compreender melhor sua situação e encaminhar sua "
+        "solicitação aos voluntários."
+    ),
     'ride_confirm_medical': "Pronto, sua solicitação foi enviada aos voluntários mais próximos! \n Normalmente, alguém retorna em até 30 min a 1 hora. \nSe não houver resposta nesse período, procure ajuda de alguém conhecido ou alguém mais próximo de você.",
-    'ride_confirm_generic': "Pronto, sua solicitação foi enviada aos voluntários mais próximos! \n Normalmente, alguém retorna em até 30 min a 1 hora. \nSe não houver resposta nesse período, procure ajuda de alguém conhecido ou alguém mais próximo de você.",
+    # Farmácia, Outro destino e Bate-papo.
+    'ride_confirm_ok': (
+        "OK obrigado, sua solicitação foi enviada aos voluntários mais próximos!\n"
+        "Normalmente, alguém retorna em até 30 min a 1 hora.\n"
+        "Se não houver resposta nesse período, procure ajuda de alguém conhecido ou alguém mais próximo de você."
+    ),
     'pergunta_cep': (
         "Antes de continuar: qual é o CEP da sua casa? 🏠\n"
         "Com ele avisamos primeiro os voluntários que moram mais perto quando você ou alguém da rede precisar de ajuda.\n\n"
@@ -198,13 +241,38 @@ MESSAGES = {
     ),
     'cep_invalido': "Não reconheci esse CEP. Ele tem 8 números (ex.: 00000-000). Tente de novo ou escreva *pular*.",
     'cep_salvo': "Obrigado! CEP salvo. 🙌",
-    'feedback_prompt': (
-        "A sua opinião é muito importante para nós! Estamos sempre em busca de evoluir a usabilidade e a experiência da Rede UniConecta CCCI.\n\n"
-        "Se quiser contribuir com sugestões, críticas construtivas ou melhorias, envie um e-mail para: uniconecta@unicin.org\n\n"
-        "A Rede de apoio UniConecta CCCI é construída por todos nós. \n"
-        "Contamos com você para torná-la cada vez mais funcional, acolhedora e interassistencial!"
+    # Resposta ao comentário da avaliação (o pedido da avaliação sai do lambda_check, 10 min após o aceite).
+    'feedback_thanks': (
+        "Agradecemos muito pelo seu retorno!\n\n"
+        "Sua experiência e sua opinião são importantes para nós. Cada feedback nos ajuda a identificar o que está "
+        "funcionando bem e também o que podemos melhorar na Rede de Apoio UniConecta CCCI.\n\n"
+        "Estamos construindo essa rede juntos e queremos torná-la cada vez mais funcional, acolhedora e interassistencial.\n\n"
+        "Se quiser contribuir com sugestões, críticas construtivas ou melhorias, envie um email para uniconecta@unicin.org\n\n"
+        "Obrigado por contribuir com essa construção!"
     ),
 }
+
+# Tipos da Ajuda Urgente: id do botão -> texto do pedido. 'outra' pula a pergunta do prazo.
+# 'emocional' saiu do menu; continua aceito para cliques em mensagens enviadas antes da mudança.
+EMERGENCY_TYPES = {
+    'seguranca': "Questão de saúde ou segurança",
+    'atividade': "Ajuda com atividade/evento",
+    'outra': "Outra situação urgente",
+    'emocional': "Outra situação urgente",
+}
+EMERGENCY_TIMINGS = {
+    'hoje': "O quanto antes, hoje",
+    '24h': "Nas próximas 24h",
+    'semana': "Dentro da semana",
+}
+
+# Estados em que o bot espera uma resposta em texto (ver o roteador no lambda_handler).
+TEXT_WAIT_STATES = ('awaiting_cep', 'awaiting_emergency_details|', 'awaiting_ride_details_',
+                    'awaiting_ride_pharmacy_step2|', 'awaiting_ride_other_step', 'awaiting_chat_details',
+                    'awaiting_feedback|')
+
+# Avaliação: o lambda_check põe a pessoa em 'awaiting_feedback|<pedido>|<papel>' ao pedir o comentário.
+FEEDBACK_ROLES = ('requester', 'accepter')
 
 # --- Auxiliary Functions ---
 
@@ -292,9 +360,9 @@ def send_many(send, targets):
 
 def send_emergency_type_buttons(to):
     # Títulos com no máximo 20 caracteres (limite do WhatsApp)
-    action = _buttons(("emergency_type_seguranca", "Saúde ou Segurança"),
-                      ("emergency_type_emocional", "Apoio Emocional"),
-                      ("emergency_type_atividade", "Atividades/Evento"))
+    action = _buttons(("emergency_type_seguranca", "Saúde e Segurança"),
+                      ("emergency_type_atividade", "Atividade/Evento"),
+                      ("emergency_type_outra", "Outra urgência"))
     return send_interactive_message(to, "button", MESSAGES['emergency_new_type_prompt'], action)
 
 def send_emergency_timing_buttons(to):
@@ -307,7 +375,7 @@ def send_emergency_timing_buttons(to):
 def send_ride_type_buttons(to):
     action = _buttons(("ride_type_medical", "1- Consulta Médica"),
                       ("ride_type_pharmacy", "2- Farmácia"),
-                      ("ride_type_other", "3- Outro lugar"))
+                      ("ride_type_other", "3- Outro destino"))
     return send_interactive_message(to, "button", MESSAGES['ride_intro'], action)
 
 
@@ -366,7 +434,8 @@ def get_approved_members(exclude_id=None):
                 uid = it.get('ID')
                 if uid and uid != exclude_id:
                     members.append({'id': uid, 'to': it.get('wa_jid') or uid,
-                                    'cep': it.get('cep'), 'bairro': it.get('bairro')})
+                                    'cep': it.get('cep'), 'bairro': it.get('bairro'),
+                                    'possui_carro': it.get('possui_carro') is True})
             if 'LastEvaluatedKey' not in response:
                 break
             kwargs['ExclusiveStartKey'] = response['LastEvaluatedKey']
@@ -430,7 +499,7 @@ def send_target(user_id):
 def generate_request_id():
     return f"{''.join(random.choices(string.ascii_uppercase, k=3))}-{''.join(random.choices(string.digits, k=3))}"
 
-def create_and_notify_request(sender_id, user_info, request_type, alert_label, user_input="", confirmation_message_key='ride_confirm_generic'):
+def create_and_notify_request(sender_id, user_info, request_type, alert_label, user_input="", confirmation_message_key='ride_confirm_ok'):
     # Usa o ID canônico armazenado (resolve o 9º dígito), não o JID recebido.
     user_id_clean = user_info.get('ID') or sender_id.replace('@s.whatsapp.net', '').replace('@c.us', '')
     requester_wa = re.sub(r'\D', '', sender_id.split('@')[0]) or user_id_clean  # JID real de quem pediu
@@ -445,8 +514,10 @@ def create_and_notify_request(sender_id, user_info, request_type, alert_label, u
     # Em modo waves, a 1ª onda vai para os mais próximos (CEP/bairro) e o lambda_check
     # amplia o resto. Urgência vai para a rede toda de uma vez.
     use_waves = DISPATCH_MODE == 'waves'
+    # Carona: dentro de cada nível de proximidade, quem tem carro é avisado primeiro.
     waves = dispatch.build_waves(user_info, network, min_size=MIN_ONDA,
-                                 broadcast=not use_waves or request_type.startswith('emergency_'))
+                                 broadcast=not use_waves or request_type.startswith('emergency_'),
+                                 prefer=(lambda m: m.get('possui_carro')) if request_type.startswith('ride_') else None)
     first_wave, pending_waves = waves[0], waves[1:]
 
     contact_list = [r['id'] for r in first_wave]  # IDs canônicos de quem foi avisado (matching do aceite)
@@ -482,6 +553,26 @@ def create_and_notify_request(sender_id, user_info, request_type, alert_label, u
                 f"{success_count}/{len(first_wave)} members (network: {len(network)}).")
     send_text(sender_id, MESSAGES[confirmation_message_key] if success_count > 0 else MESSAGES['erro_envio_notificacao'])
     update_user_data(user_id_clean, 'initial')
+
+def save_feedback(user_id, state, comment):
+    """Grava o comentário da avaliação como item próprio da tabela de pedidos
+    (ID 'FB-<pedido>-<papel>'). Com creation_timestamp do momento da resposta, o arquivo
+    diário do S3 o inclui no dia em que a avaliação foi dada; sem 'status', os scans do
+    monitor não o confundem com um pedido."""
+    _, request_id, role = (state.split('|') + ['', ''])[:3]
+    now = datetime.utcnow()
+    item = {
+        'ID': f"FB-{request_id or 'desconhecido'}-{role if role in FEEDBACK_ROLES else 'desconhecido'}",
+        'item_type': 'feedback', 'request_id': request_id, 'role': role, 'user_id': user_id,
+        'comment': comment, 'creation_timestamp': now.isoformat(),
+        'ttl': int(time.time()) + REQUEST_TTL_DAYS * 86400,
+    }
+    try:
+        requests_table.put_item(Item=item)
+        logger.info(f"Feedback saved for request {request_id} ({role}).")
+    except Exception as e:
+        logger.error(f"Error saving feedback for request {request_id} ({role}): {e}")
+
 
 def handle_acceptance(accepter_id, request_id):
     accepter_id_clean = accepter_id.replace('@s.whatsapp.net', '').replace('@c.us', '')
@@ -678,8 +769,9 @@ def lambda_handler(event, context):
             state = user_info.get('conversation_state', 'initial')
             logger.info(f"User: {user_id_clean}, State: {state}, Action_ID: {action_id}")
 
-            # A pergunta do CEP nunca bloqueia o menu: um clique de botão segue o fluxo normal.
-            if action_id and state.startswith('awaiting_cep'):
+            # Estados que esperam texto (CEP, descrições, avaliação) nunca bloqueiam o menu:
+            # um clique de botão segue o fluxo normal a partir do início.
+            if action_id and state.startswith(TEXT_WAIT_STATES):
                 state = 'initial'
 
             # --- Button Click Router ---
@@ -694,41 +786,28 @@ def lambda_handler(event, context):
                     send_menu_or_ask_cep(sender_id, user_id_clean, user_info)
                     continue
                 
-                # --- FLUXO AJUDA URGENTE (2 ETAPAS) ---
+                # --- FLUXO AJUDA URGENTE: tipo -> prazo -> descrição (Outra urgência pula o prazo) ---
                 if state == 'awaiting_emergency_type':
-                    type_choice = None
-                    if action_id.endswith('emergency_type_emocional'): type_choice = "emocional"
-                    elif action_id.endswith('emergency_type_atividade'): type_choice = "atividade"
-                    elif action_id.endswith('emergency_type_seguranca'): type_choice = "seguranca"
-                    
-                    if type_choice:
-                        send_emergency_timing_buttons(sender_id) 
-                        new_state = f"awaiting_emergency_timing_{type_choice}" 
-                        update_user_data(user_id_clean, new_state)
+                    type_choice = next((t for t in EMERGENCY_TYPES if action_id.endswith(f'emergency_type_{t}')), None)
+                    if type_choice in ('outra', 'emocional'):
+                        send_text(sender_id, MESSAGES['emergency_ask_other'])
+                        update_user_data(user_id_clean, 'awaiting_emergency_details|outra|')
+                    elif type_choice:
+                        send_emergency_timing_buttons(sender_id)
+                        update_user_data(user_id_clean, f"awaiting_emergency_timing_{type_choice}")
                     else:
                         logger.warning(f"Loop detectado ou action_id não reconhecido. Action_ID: '{action_id}'. Re-perguntando Etapa 1.")
-                        send_emergency_type_buttons(sender_id) 
+                        send_emergency_type_buttons(sender_id)
                     continue
 
                 elif state.startswith('awaiting_emergency_timing_'):
-                    timing_choice_id = action_id
-                    timing_choice_text = ""
-                    if timing_choice_id.endswith('emergency_timing_hoje'): timing_choice_text = "O quanto antes, hoje"
-                    elif timing_choice_id.endswith('emergency_timing_24h'): timing_choice_text = "Nas próximas 24h"
-                    elif timing_choice_id.endswith('emergency_timing_semana'): timing_choice_text = "Dentro da semana"
-                    
-                    type_choice_id = state.replace('awaiting_emergency_timing_', '')
-                    type_choice_text = ""
-                    if type_choice_id == 'emocional': type_choice_text = "Apoio emocional"
-                    elif type_choice_id == 'atividade': type_choice_text = "Ajuda com atividades/evento"
-                    elif type_choice_id == 'seguranca': type_choice_text = "Questão de saúde ou segurança"
-
-                    if timing_choice_text and type_choice_text:
-                        user_input_details = f"{type_choice_text} - Quando: {timing_choice_text}"
-                        request_type = f"emergency_{type_choice_id}"
-                        create_and_notify_request(sender_id, user_info, request_type, "🚨 Ajuda urgente", user_input_details, confirmation_message_key='emergency_confirmation')
+                    timing_choice = next((t for t in EMERGENCY_TIMINGS if action_id.endswith(f'emergency_timing_{t}')), None)
+                    type_choice = state.replace('awaiting_emergency_timing_', '')
+                    if timing_choice and type_choice in EMERGENCY_TYPES:
+                        send_text(sender_id, MESSAGES['emergency_ask_details'])
+                        update_user_data(user_id_clean, f"awaiting_emergency_details|{type_choice}|{timing_choice}")
                     else:
-                        logger.warning(f"Action_id de tempo não reconhecido: '{timing_choice_id}'. Re-perguntando Etapa 2.")
+                        logger.warning(f"Action_id de tempo não reconhecido: '{action_id}'. Re-perguntando Etapa 2.")
                         send_emergency_timing_buttons(sender_id)
                     continue
                 
@@ -757,8 +836,9 @@ def lambda_handler(event, context):
                         send_ride_type_buttons(sender_id)
                         update_user_data(user_id_clean, 'awaiting_ride_type')
                         continue
-                    elif action_id.endswith('menu_chat'): 
+                    elif action_id.endswith('menu_chat'):
                         send_text(sender_id, MESSAGES['pergunta_batepapo'])
+                        send_text(sender_id, MESSAGES['pergunta_batepapo_detalhes'])
                         update_user_data(user_id_clean, 'awaiting_chat_details')
                         continue
             
@@ -776,35 +856,53 @@ def lambda_handler(event, context):
                 update_user_data(user_id_clean, 'initial')
                 continue
 
-            # --- State-based Text Input Flows ---
-            if state in ['awaiting_ride_details_medical', 'awaiting_ride_details_pharmacy']:
-                confirmation_key, alert_label, request_type = ('ride_confirm_generic', "🚗 Carona solidária", "ride_other")
-                if state == 'awaiting_ride_details_medical':
-                    confirmation_key, alert_label, request_type = ('ride_confirm_medical', "🚗 Carona p/ consulta", "ride_medical")
-                elif state == 'awaiting_ride_details_pharmacy':
-                    alert_label, request_type = ("🚗 Carona p/ farmácia", "ride_pharmacy")
+            # --- State-based Text Input Flows (só texto: um clique de botão nunca cria pedido vazio) ---
+            if action_id:
+                pass
 
-                create_and_notify_request(sender_id, user_info, request_type, alert_label, text_input, confirmation_key)
+            elif state.startswith('awaiting_emergency_details|'):
+                _, type_choice, timing_choice = (state.split('|') + ['', ''])[:3]
+                type_text = EMERGENCY_TYPES.get(type_choice, EMERGENCY_TYPES['outra'])
+                when = f" - Quando: {EMERGENCY_TIMINGS[timing_choice]}" if timing_choice in EMERGENCY_TIMINGS else ""
+                request_type = 'emergency_outra' if type_choice == 'emocional' else f"emergency_{type_choice or 'outra'}"
+                create_and_notify_request(sender_id, user_info, request_type, "🚨 Ajuda urgente",
+                                          f"{type_text}{when}\n{text_input}", confirmation_message_key='emergency_confirmation')
+                continue
+
+            elif state == 'awaiting_ride_details_medical':
+                create_and_notify_request(sender_id, user_info, "ride_medical", "🚗 Carona p/ consulta", text_input, 'ride_confirm_medical')
+                continue
+
+            elif state == 'awaiting_ride_details_pharmacy':
+                send_text(sender_id, MESSAGES['ride_ask_details_pharmacy_step2'])
+                update_user_data(user_id_clean, f"awaiting_ride_pharmacy_step2|{text_input}")
+                continue
+
+            elif state.startswith('awaiting_ride_pharmacy_step2|'):
+                when = state.split('|', 1)[1] or 'Não informado'
+                create_and_notify_request(sender_id, user_info, "ride_pharmacy", "🚗 Carona p/ farmácia",
+                                          f"Dia e horário: {when}\nDetalhes: {text_input}", 'ride_confirm_ok')
                 continue
 
             elif state == 'awaiting_ride_other_step1':
                 send_text(sender_id, MESSAGES['ride_ask_details_other_step2'])
                 update_user_data(user_id_clean, f"awaiting_ride_other_step2|{text_input}")
                 continue
-            
+
             elif state.startswith('awaiting_ride_other_step2|'):
-                timing_details = text_input
-                try:
-                    location_details = state.split('|', 1)[1]
-                except IndexError:
-                    location_details = 'Não informado'
-                
-                user_input_combined = f"Local/Atividade: {location_details}\nDisponibilidade: {timing_details}"
-                create_and_notify_request(sender_id, user_info, "ride_other", "🚗 Carona solidária - outros", user_input_combined, confirmation_message_key='ride_confirm_other_final')
+                need = state.split('|', 1)[1] or 'Não informado'
+                create_and_notify_request(sender_id, user_info, "ride_other", "🚗 Carona solidária - outro destino",
+                                          f"Necessidade: {need}\nDetalhes: {text_input}", 'ride_confirm_ok')
                 continue
 
             elif state == 'awaiting_chat_details':
-                create_and_notify_request(sender_id, user_info, "chat", "💬 Bate-papo", text_input, 'ride_confirm_generic')
+                create_and_notify_request(sender_id, user_info, "chat", "💬 Bate-papo", text_input, 'ride_confirm_ok')
+                continue
+
+            elif state.startswith('awaiting_feedback|'):
+                save_feedback(user_id_clean, state, text_input)
+                send_text(sender_id, MESSAGES['feedback_thanks'])
+                update_user_data(user_id_clean, 'initial')
                 continue
 
             # --- Default Flow ---

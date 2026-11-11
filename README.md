@@ -16,7 +16,7 @@ pipeline do canvas busca o código aqui a cada apply.
 | `SiteFiles/ccci-chatbot` | Build do site, gravado pelo workflow **Site build** a cada merge. Não edite à mão. | Sim |
 | `LambdaFiles/UniconectaApp` | API do site: cadastro, login do painel, lista e edição dos cadastros, consulta ao ICnet e mensagem de boas-vindas na aprovação. | Sim |
 | `LambdaFiles/BOT` | Webhook do WhatsApp: recebe as mensagens e conduz as conversas com solicitantes e voluntários. | Sim |
-| `LambdaFiles/lambda_check` | Monitor executado pelo Timer do EventBridge: amplia o envio dos pedidos em ondas, avisa os supervisores dos pedidos sem resposta, reinicia as conversas paradas, envia a mensagem de feedback depois do aceite e grava o arquivo diário dos pedidos no S3. | Sim |
+| `LambdaFiles/lambda_check` | Monitor executado pelo Timer do EventBridge: amplia o envio dos pedidos em ondas, avisa os supervisores dos pedidos sem resposta, reinicia as conversas paradas, pede a avaliação do atendimento a quem pediu e a quem aceitou (10 min depois do aceite; o BOT grava o comentário como item `FB-<pedido>-<papel>` na tabela de pedidos) e grava o arquivo diário dos pedidos no S3. | Sim |
 | `LambdaFiles/UniConAppAdm`, `LambdaFiles/UniconectaAppAdm`, `LambdaFiles/UniconectaAppPub` | Arquivos de 6 linhas de uma versão antiga. Nenhum state do canvas os usa. | Não |
 | `tools/whatsapp` | Guia da WhatsApp Cloud API, script de criação dos templates e teste de ponta a ponta local. Ver o [README da pasta](tools/whatsapp/README.md). | Não |
 | `.github/workflows/site-build.yml` | Workflow **Site build**: testa e compila o site. | Não |
