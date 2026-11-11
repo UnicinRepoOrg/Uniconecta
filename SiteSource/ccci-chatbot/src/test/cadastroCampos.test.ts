@@ -4,7 +4,7 @@ import { resolve } from "path";
 import {
   CAMPOS, SECOES, DECLARACAO, TOTAL_CAIXAS_DECLARACAO, CONDOMINIOS_COGNOPOLIS, CONDOMINIO_OUTRO,
   calcularIdade, canonicalPhone, canonicalCep, ehCognopolis, formularioVazio, formularioDoCadastro,
-  paraPayload, validarFormulario, camposDoDetalhe, campoVisivel, type FormState, type PessoasForm,
+  paraPayload, validarFormulario, camposDoDetalhe, campoVisivel, campoAtivo, type FormState, type PessoasForm,
 } from "@/lib/cadastroCampos";
 import type { SupportRecipient } from "@/components/RecipientTable";
 
@@ -133,6 +133,7 @@ const formCompleto = (): FormState => ({
   whatsapp: "(31) 99000-0000",
   voluntario_ic: "CCCI",
   mora_sozinho: "sim",
+  pessoas_vinculadas: { tem: "nao", lista: [] },
   possui_carro: "nao",
   contato_familia: "Ana 31 98888-7777",
   contato_ccci: "João 31 97777-6666",
@@ -180,7 +181,8 @@ describe("validarFormulario e paraPayload", () => {
 
   it("validates the people who live with the volunteer", () => {
     const comPessoas = (p: PessoasForm): FormState => ({ ...formCompleto(), mora_sozinho: "nao", pessoas_vinculadas: p });
-    expect(validarFormulario({ ...formCompleto(), mora_sozinho: "nao" }, "cadastro")?.campo.key).toBe("pessoas_vinculadas");
+    // A pergunta aparece sempre, com ou sem "Mora sozinho?", e é obrigatória no cadastro.
+    expect(validarFormulario({ ...formCompleto(), pessoas_vinculadas: { tem: "", lista: [] } }, "cadastro")?.campo.key).toBe("pessoas_vinculadas");
     expect(validarFormulario(comPessoas({ tem: "sim", lista: [{ nome: "Ana", telefone: "123", vinculo: "familiar" }] }), "cadastro")?.mensagem)
       .toMatch(/Telefone inválido/);
     expect(validarFormulario(comPessoas({ tem: "sim", lista: [{ nome: "Ana", telefone: "31 98888-7777", vinculo: "" }] }), "cadastro")?.mensagem)
@@ -198,6 +200,18 @@ describe("validarFormulario e paraPayload", () => {
       { nome: "Rui", telefone: "553133334444", vinculo: "companheiro" },
     ]);
     expect(paraPayload(comPessoas({ tem: "nao", lista: [] })).pessoas_vinculadas).toEqual([]);
+  });
+
+  it("always shows the carona questions, but only answerable with a car", () => {
+    const carona = ["carona_disponibilidade", "carona_regiao", "carona_dias", "carona_periodo"];
+    for (const key of carona) {
+      const campo = CAMPOS.find((c) => c.key === key)!;
+      expect(campoVisivel(campo, formCompleto())).toBe(true);
+      expect(campoAtivo(campo, formCompleto())).toBe(false);
+      expect(campoAtivo(campo, { ...formCompleto(), possui_carro: "sim" })).toBe(true);
+    }
+    const pessoas = CAMPOS.find((c) => c.key === "pessoas_vinculadas")!;
+    expect(campoVisivel(pessoas, formCompleto())).toBe(true);
   });
 
   it("sends the carona details only when the volunteer offers rides", () => {

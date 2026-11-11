@@ -9,7 +9,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Plus, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
-  CONDOMINIOS_COGNOPOLIS, CONDOMINIO_OUTRO, VINCULOS, pessoaVazia, hojeIso, idadeDoFormulario, calcularIdade,
+  CONDOMINIOS_COGNOPOLIS, CONDOMINIO_OUTRO, VINCULOS, pessoaVazia, hojeIso, idadeDoFormulario, calcularIdade, campoAtivo,
   type Campo, type FormState, type ValorForm, type PessoasForm, type CondominioForm, type Opcao,
 } from "@/lib/cadastroCampos";
 
@@ -156,8 +156,13 @@ export const CampoCadastro = ({ campo, form, onChange, idPrefix = "", destacarVa
 
   // Grupos de opções não têm um único elemento para o htmlFor.
   const temControleUnico = ["text", "textarea", "date", "idade", "cep"].includes(campo.tipo);
+  // Pergunta sempre na tela mas ainda não respondível (ex.: detalhes da carona sem carro = Sim).
+  const inativo = !campoAtivo(campo, form);
   return (
-    <div id={`${idPrefix}campo-${campo.key}`} className={cn("space-y-2", destacarVazio && "rounded-md border border-destructive/60 p-2")}>
+    <div
+      id={`${idPrefix}campo-${campo.key}`}
+      className={cn("space-y-2", destacarVazio && "rounded-md border border-destructive/60 p-2", inativo && "opacity-50")}
+    >
       {campo.introducao?.map((t) => (
         <p key={t} className="text-sm text-muted-foreground leading-relaxed">{t}</p>
       ))}
@@ -168,7 +173,9 @@ export const CampoCadastro = ({ campo, form, onChange, idPrefix = "", destacarVa
       {campo.ajuda?.map((a) => (
         <p key={a} className="text-xs text-muted-foreground">{a}</p>
       ))}
-      {entrada}
+      {inativo && campo.quandoInativo && <p className="text-xs italic text-muted-foreground">{campo.quandoInativo}</p>}
+      {/* fieldset disabled desabilita de uma vez inputs, radios e checkboxes (todos são <input> ou <button>). */}
+      <fieldset disabled={inativo} className="min-w-0">{entrada}</fieldset>
       {destacarVazio && <p className="text-xs text-destructive">Não preenchido neste cadastro.</p>}
     </div>
   );
